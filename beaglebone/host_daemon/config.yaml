@@ -1,0 +1,51 @@
+pru:
+  encoder_rpmsg_dev: /dev/rpmsg_pru30
+  motor_rpmsg_dev: /dev/rpmsg_pru31
+  rx_poll_hz: 250
+  encoder_poll_hz: 25
+  motor_tx_hz: 40
+
+encoder:
+  sample_period_us: 20
+  velocity_interval_ms: 20
+  stream_hz: 20
+
+sabertooth:
+  mode: packetized          # packetized | simplified
+  baud: 38400
+  address: 128
+  tx_pru1_r30_bit: 0
+  ramp_step: 40
+  pru_watchdog_ms: 200
+  control_period_us: 10000
+
+safety:
+  command_timeout_ms: 200
+  safe_stop_hold_ms: 300
+
+pins:
+  encoders:
+    wheel0_A: P8_45          # pru0_r31_0
+    wheel0_B: P8_46          # pru0_r31_1
+    wheel1_A: P8_43          # pru0_r31_2
+    wheel1_B: P8_44          # pru0_r31_3
+    wheel2_A: P8_41          # pru0_r31_4
+    wheel2_B: P8_42          # pru0_r31_5
+    wheel3_A: P8_39          # pru0_r31_6
+    wheel3_B: P8_40          # pru0_r31_7
+
+  sabertooth:
+    tx_header_pin: P9_31      # Example PRU1 TX pin candidate (pru1_r30_0); confirm on your cape/pinmux
+    s2_stop_gpio_number: 48   # Linux GPIO number (default: gpio1_16 / P9_15)
+    s2_stop_active_high: true
+
+api:
+  host: 0.0.0.0
+  port: 8080
+  websocket_hz: 20
+
+drive:
+  command_scale: 1000
+  max_linear_mps: 0.45
+  max_angular_radps: 1.5
+  wheel_base_m: 0.32

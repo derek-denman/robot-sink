@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BBB Base Controller</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="layout">
+    <header class="panel hero">
+      <h1>BeagleBone Base Controller</h1>
+      <p>Local control and telemetry for the living-room toy tidy robot.</p>
+      <div class="status-row">
+        <span id="connection" class="pill offline">WS Offline</span>
+        <span id="armedState" class="pill disarmed">Disarmed</span>
+      </div>
+    </header>
+
+    <section class="panel controls">
+      <div class="button-row">
+        <button id="armBtn" class="btn arm">Arm</button>
+        <button id="estopBtn" class="btn estop">E-STOP</button>
+        <button id="resetEncBtn" class="btn neutral">Reset Encoders</button>
+      </div>
+
+      <div class="mode-row">
+        <label>
+          <input type="radio" name="driveMode" value="tank" checked>
+          Left/Right
+        </label>
+        <label>
+          <input type="radio" name="driveMode" value="cmdvel">
+          cmd_vel (v, w)
+        </label>
+      </div>
+
+      <div id="tankControls" class="grid-2">
+        <label>Left
+          <input id="leftSlider" type="range" min="-1000" max="1000" step="10" value="0">
+          <output id="leftValue">0</output>
+        </label>
+        <label>Right
+          <input id="rightSlider" type="range" min="-1000" max="1000" step="10" value="0">
+          <output id="rightValue">0</output>
+        </label>
+      </div>
+
+      <div id="cmdVelControls" class="grid-2 hidden">
+        <label>Linear (m/s)
+          <input id="linearSlider" type="range" min="-0.45" max="0.45" step="0.01" value="0">
+          <output id="linearValue">0.00</output>
+        </label>
+        <label>Angular (rad/s)
+          <input id="angularSlider" type="range" min="-1.50" max="1.50" step="0.01" value="0">
+          <output id="angularValue">0.00</output>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel telemetry">
+      <h2>Telemetry</h2>
+      <div class="kv"><span>Watchdog</span><strong id="watchdogState">OK</strong></div>
+      <div class="kv"><span>Last command age</span><strong id="cmdAge">-</strong></div>
+      <div class="kv"><span>Encoder age</span><strong id="encAge">-</strong></div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Wheel</th>
+            <th>Count</th>
+            <th>Velocity (ticks/s)</th>
+          </tr>
+        </thead>
+        <tbody id="encoderRows"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

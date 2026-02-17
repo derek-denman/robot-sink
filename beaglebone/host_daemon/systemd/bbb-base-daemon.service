@@ -1,0 +1,16 @@
+[Unit]
+Description=BeagleBone MVP Base Controller Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+Group=debian
+WorkingDirectory=@REPO_ROOT@/beaglebone/host_daemon
+ExecStart=/usr/bin/python3 @REPO_ROOT@/beaglebone/host_daemon/bbb_base_daemon.py --config @REPO_ROOT@/beaglebone/host_daemon/config.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
