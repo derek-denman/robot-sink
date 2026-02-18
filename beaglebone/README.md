@@ -15,6 +15,7 @@ Complete BBGG base-controller stack for the living-room toy tidy robot MVP:
    - `./beaglebone/scripts/install_deps.sh`
 2. Build PRU firmware:
    - `./beaglebone/scripts/build_pru.sh`
+   - On Debian `trixie`, this may use TI `clpru/lnkpru` fallback (`ti-pru-cgt-v2.3`) if `pru-gcc` is unavailable.
 3. Deploy and start PRUs via remoteproc:
    - `./beaglebone/scripts/deploy_firmware.sh`
 4. Start daemon manually first:
