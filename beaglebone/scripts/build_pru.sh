@@ -88,9 +88,18 @@ find_lnkpru() {
 
 find_pru_ssp() {
   local candidates=()
+  local home_dir="${HOME:-}"
 
   if [[ -n "${PRU_SSP:-}" ]]; then
     candidates+=("${PRU_SSP}")
+  fi
+
+  if [[ -n "${home_dir}" ]]; then
+    candidates+=(
+      "${home_dir}/pru-software-support-package"
+      "${home_dir}/src/pru-software-support-package"
+      "${home_dir}/git/pru-software-support-package"
+    )
   fi
 
   candidates+=(
@@ -103,7 +112,7 @@ find_pru_ssp() {
 
   local path
   for path in "${candidates[@]}"; do
-    if [[ -f "${path}/include/pru_cfg.h" ]]; then
+    if [[ -f "${path}/include/pru_cfg.h" || -f "${path}/include/am335x/pru_cfg.h" ]]; then
       printf '%s\n' "${path}"
       return 0
     fi
@@ -241,6 +250,42 @@ find_pru_rpmsg_src() {
   return 1
 }
 
+find_pru_virtqueue_src() {
+  local ssp="$1"
+  local candidates=()
+
+  if [[ -n "${PRU_TI_VIRTQUEUE_SRC:-}" ]]; then
+    candidates+=("${PRU_TI_VIRTQUEUE_SRC}")
+  fi
+
+  candidates+=(
+    "${ssp}/lib/src/rpmsg_lib/pru_virtqueue.c"
+    "${ssp}/lib/src/virtqueue/pru_virtqueue.c"
+    "${ssp}/lib/src/virtio_ring/pru_virtqueue.c"
+    "${ssp}/src/pru_virtqueue.c"
+  )
+
+  local src
+  for src in "${candidates[@]}"; do
+    if [[ -f "${src}" ]]; then
+      printf '%s\n' "${src}"
+      return 0
+    fi
+  done
+
+  src="$(
+    find "${ssp}" -maxdepth 8 -type f -name 'pru_virtqueue.c' \
+      | head -n 1
+  )"
+
+  if [[ -n "${src}" ]]; then
+    printf '%s\n' "${src}"
+    return 0
+  fi
+
+  return 1
+}
+
 PRU_GCC_BIN="$(find_pru_gcc || true)"
 PRU_CLPRU_BIN="$(find_clpru || true)"
 PRU_LNKPRU_BIN="$(find_lnkpru || true)"
@@ -249,10 +294,11 @@ PRU_CMD_FILE_PATH=""
 PRU_TI_CGT_LIBDIR_PATH=""
 PRU_TI_RPMSG_LIB_PATH=""
 PRU_TI_RPMSG_SRC_PATH=""
+PRU_TI_VIRTQUEUE_SRC_PATH=""
 
 if [[ -z "${PRU_SSP_DIR}" ]]; then
   echo "[build_pru] ERROR: could not find PRU Software Support Package headers." >&2
-  echo "[build_pru] Expected include/pru_cfg.h under PRU_SSP." >&2
+  echo "[build_pru] Expected include/pru_cfg.h or include/am335x/pru_cfg.h under PRU_SSP." >&2
   echo "[build_pru] Install package: pru-software-support-package (or set PRU_SSP=/path/to/ssp)." >&2
   exit 1
 fi
@@ -269,6 +315,7 @@ echo "[build_pru] using PRU_CMD_FILE=${PRU_CMD_FILE_PATH}"
 
 if [[ -n "${PRU_GCC_BIN}" ]]; then
   echo "[build_pru] toolchain=gcc PRU_CC=${PRU_GCC_BIN}"
+  make -C "${REPO_ROOT}/beaglebone/pru_fw" clean >/dev/null 2>&1 || true
   make -C "${REPO_ROOT}/beaglebone/pru_fw" all \
     TOOLCHAIN=gcc \
     PRU_CC="${PRU_GCC_BIN}" \
@@ -280,8 +327,21 @@ fi
 if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
   PRU_TI_CGT_LIBDIR_PATH="$(find_ti_cgt_libdir "${PRU_CLPRU_BIN}" || true)"
   PRU_TI_RPMSG_LIB_PATH="$(find_pru_rpmsg_lib "${PRU_SSP_DIR}" || true)"
-  if [[ -z "${PRU_TI_RPMSG_LIB_PATH}" ]]; then
-    PRU_TI_RPMSG_SRC_PATH="$(find_pru_rpmsg_src "${PRU_SSP_DIR}" || true)"
+  # Prefer source pair so objects are rebuilt with matching ABI.
+  PRU_TI_RPMSG_SRC_PATH="$(find_pru_rpmsg_src "${PRU_SSP_DIR}" || true)"
+  if [[ -n "${PRU_TI_RPMSG_SRC_PATH}" ]]; then
+    PRU_TI_VIRTQUEUE_SRC_PATH="$(find_pru_virtqueue_src "${PRU_SSP_DIR}" || true)"
+  fi
+
+  if [[ -n "${PRU_TI_RPMSG_SRC_PATH}" && -z "${PRU_TI_VIRTQUEUE_SRC_PATH}" ]]; then
+    if [[ -n "${PRU_TI_RPMSG_LIB_PATH}" ]]; then
+      echo "[build_pru] note: pru_rpmsg.c found but pru_virtqueue.c missing; falling back to RPMsg library"
+      PRU_TI_RPMSG_SRC_PATH=""
+    else
+      echo "[build_pru] ERROR: found pru_rpmsg.c but missing pru_virtqueue.c." >&2
+      echo "[build_pru] Set PRU_TI_VIRTQUEUE_SRC=/path/to/pru_virtqueue.c or provide PRU_TI_RPMSG_LIB." >&2
+      exit 1
+    fi
   fi
 
   if [[ -z "${PRU_TI_RPMSG_LIB_PATH}" && -z "${PRU_TI_RPMSG_SRC_PATH}" ]]; then
@@ -300,8 +360,10 @@ if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
     echo "[build_pru] using PRU_TI_RPMSG_LIB=${PRU_TI_RPMSG_LIB_PATH}"
   else
     echo "[build_pru] using PRU_TI_RPMSG_SRC=${PRU_TI_RPMSG_SRC_PATH}"
+    echo "[build_pru] using PRU_TI_VIRTQUEUE_SRC=${PRU_TI_VIRTQUEUE_SRC_PATH}"
   fi
 
+  make -C "${REPO_ROOT}/beaglebone/pru_fw" clean >/dev/null 2>&1 || true
   make -C "${REPO_ROOT}/beaglebone/pru_fw" all \
     TOOLCHAIN=ti \
     PRU_CLPRU="${PRU_CLPRU_BIN}" \
@@ -310,7 +372,8 @@ if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
     PRU_CMD_FILE="${PRU_CMD_FILE_PATH}" \
     PRU_TI_CGT_LIBDIR="${PRU_TI_CGT_LIBDIR_PATH}" \
     PRU_TI_RPMSG_LIB="${PRU_TI_RPMSG_LIB_PATH}" \
-    PRU_TI_RPMSG_SRC="${PRU_TI_RPMSG_SRC_PATH}"
+    PRU_TI_RPMSG_SRC="${PRU_TI_RPMSG_SRC_PATH}" \
+    PRU_TI_VIRTQUEUE_SRC="${PRU_TI_VIRTQUEUE_SRC_PATH}"
   exit 0
 fi
 

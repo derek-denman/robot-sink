@@ -74,11 +74,11 @@ if command -v lnkpru >/dev/null 2>&1; then
   echo "[install_deps] lnkpru found: $(command -v lnkpru)"
 fi
 
-if [[ -f /usr/lib/pru-software-support-package/include/pru_cfg.h ]]; then
+if [[ -f /usr/lib/pru-software-support-package/include/pru_cfg.h || -f /usr/lib/pru-software-support-package/include/am335x/pru_cfg.h ]]; then
   echo "[install_deps] PRU SSP headers found in /usr/lib/pru-software-support-package/include"
-elif [[ -f /usr/share/pru-software-support-package/include/pru_cfg.h ]]; then
+elif [[ -f /usr/share/pru-software-support-package/include/pru_cfg.h || -f /usr/share/pru-software-support-package/include/am335x/pru_cfg.h ]]; then
   echo "[install_deps] PRU SSP headers found in /usr/share/pru-software-support-package/include"
-elif [[ -f /usr/share/ti/pru-software-support-package/include/pru_cfg.h ]]; then
+elif [[ -f /usr/share/ti/pru-software-support-package/include/pru_cfg.h || -f /usr/share/ti/pru-software-support-package/include/am335x/pru_cfg.h ]]; then
   echo "[install_deps] PRU SSP headers found in /usr/share/ti/pru-software-support-package/include"
 else
   echo "[install_deps] WARNING: PRU SSP headers not found in standard locations."
