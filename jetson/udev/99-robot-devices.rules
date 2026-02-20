@@ -1,0 +1,14 @@
+# Stable serial aliases for robot USB devices.
+# Reload with:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+
+# RPLIDAR A1 (commonly CP2102 USB-UART bridge)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", GROUP="dialout", MODE="0660", SYMLINK+="ttyRPLIDAR"
+
+# RoArm-M2-S (common CH34x/CH9102 USB-UART bridges)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", GROUP="dialout", MODE="0660", SYMLINK+="ttyROARM"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", GROUP="dialout", MODE="0660", SYMLINK+="ttyROARM"
+
+# If you have multiple devices with the same USB-UART chipset,
+# add ATTRS{serial}=="<device-serial>" to the matching rule.
