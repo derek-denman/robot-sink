@@ -39,7 +39,13 @@ enum {
     BBB_SABER_MODE_PACKETIZED = 1,
 };
 
-typedef struct __attribute__((packed)) {
+#ifdef __TI_COMPILER_VERSION__
+#define BBB_PACKED
+#else
+#define BBB_PACKED __attribute__((packed))
+#endif
+
+typedef struct BBB_PACKED {
     uint32_t magic;
     uint8_t version;
     uint8_t module;
@@ -51,7 +57,7 @@ typedef struct __attribute__((packed)) {
     uint16_t checksum;
 } bbb_msg_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     int32_t counts[4];
     int32_t velocity_tps[4];
     uint32_t timestamp_us;
@@ -59,24 +65,24 @@ typedef struct __attribute__((packed)) {
     uint16_t flags;
 } bbb_enc_snapshot_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     uint16_t sample_period_us;
     uint16_t velocity_interval_ms;
     uint16_t stream_hz;
     uint16_t reserved0;
 } bbb_enc_params_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     int16_t left;
     int16_t right;
 } bbb_motor_cmd_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     uint8_t asserted;
     uint8_t reserved[3];
 } bbb_estop_cmd_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     uint32_t baud;
     uint8_t mode;
     uint8_t address;
@@ -88,7 +94,7 @@ typedef struct __attribute__((packed)) {
     uint16_t control_period_us;
 } bbb_saber_params_t;
 
-typedef struct __attribute__((packed)) {
+typedef struct BBB_PACKED {
     int16_t status;
     uint16_t detail;
     uint32_t timestamp_us;
@@ -146,6 +152,8 @@ static inline uint8_t bbb_validate_message(const bbb_msg_t *msg)
 
     return (bbb_message_checksum(msg) == msg->checksum) ? 1u : 0u;
 }
+
+#undef BBB_PACKED
 
 #ifdef __cplusplus
 }

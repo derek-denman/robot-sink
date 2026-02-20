@@ -9,6 +9,18 @@
 
 #include "../common/rpmsg_protocol.h"
 
+#ifndef VIRTIO_ID_RPMSG
+#define VIRTIO_ID_RPMSG 7
+#endif
+
+#ifndef VIRTIO_RPMSG_F_NS
+#define VIRTIO_RPMSG_F_NS 0
+#endif
+
+#ifndef VIRTIO_CONFIG_S_DRIVER_OK
+#define VIRTIO_CONFIG_S_DRIVER_OK 4
+#endif
+
 volatile register uint32_t __R30;
 volatile register uint32_t __R31;
 
@@ -106,6 +118,19 @@ static int16_t g_target_right;
 static int16_t g_current_left;
 static int16_t g_current_right;
 static uint8_t g_estop_asserted = 1u;
+
+static int16_t rpmsg_create_channel(struct pru_rpmsg_transport *transport)
+{
+#ifdef BBB_RPMSG_CHANNEL_NO_DESC
+    return pru_rpmsg_channel(RPMSG_NS_CREATE, transport, CHAN_NAME, CHAN_PORT);
+#else
+    return pru_rpmsg_channel(RPMSG_NS_CREATE,
+                             transport,
+                             CHAN_NAME,
+                             CHAN_DESC,
+                             CHAN_PORT);
+#endif
+}
 
 static void delay_cycles(uint32_t cycles)
 {
@@ -461,7 +486,7 @@ static void process_rpmsg(void)
 {
     uint16_t src;
     uint16_t dst;
-    int16_t len;
+    uint16_t len;
     uint8_t payload[sizeof(bbb_msg_t)];
 
     while (pru_rpmsg_receive(&g_transport,
@@ -520,11 +545,7 @@ void main(void)
                    TO_ARM_HOST,
                    FROM_ARM_HOST);
 
-    while (pru_rpmsg_channel(RPMSG_NS_CREATE,
-                             &g_transport,
-                             CHAN_NAME,
-                             CHAN_DESC,
-                             CHAN_PORT) != PRU_RPMSG_SUCCESS) {
+    while (rpmsg_create_channel(&g_transport) != PRU_RPMSG_SUCCESS) {
     }
 
     enter_estop();

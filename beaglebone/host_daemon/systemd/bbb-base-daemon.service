@@ -8,7 +8,7 @@ Type=simple
 User=debian
 Group=debian
 WorkingDirectory=@REPO_ROOT@/beaglebone/host_daemon
-ExecStart=/usr/bin/python3 @REPO_ROOT@/beaglebone/host_daemon/bbb_base_daemon.py --config @REPO_ROOT@/beaglebone/host_daemon/config.yaml
+ExecStart=@REPO_ROOT@/beaglebone/host_daemon/.venv/bin/python @REPO_ROOT@/beaglebone/host_daemon/bbb_base_daemon.py --config @REPO_ROOT@/beaglebone/host_daemon/config.yaml
 Restart=always
 RestartSec=2
 
