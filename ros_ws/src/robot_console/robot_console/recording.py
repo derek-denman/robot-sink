@@ -96,10 +96,33 @@ class RosbagRecorder:
             proc = self._proc
             session = self._active
 
+            stop_meta: Dict[str, Any] = {}
+            stop_cmd = ["ros2", "bag", "stop"]
             try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
+                stop_result = subprocess.run(
+                    stop_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=4.0,
+                )
+                stop_meta = {
+                    "stop_command": " ".join(stop_cmd),
+                    "stop_returncode": stop_result.returncode,
+                    "stop_stdout": stop_result.stdout[-200:],
+                    "stop_stderr": stop_result.stderr[-200:],
+                }
+            except (OSError, subprocess.SubprocessError):
+                stop_meta = {
+                    "stop_command": " ".join(stop_cmd),
+                    "stop_error": "ros2_bag_stop_failed_to_execute",
+                }
+
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGINT)
+                except ProcessLookupError:
+                    pass
 
             try:
                 proc.wait(timeout=timeout_sec)
@@ -117,6 +140,7 @@ class RosbagRecorder:
                 "ok": True,
                 "stopped": session.to_dict(),
                 "returncode": proc.returncode,
+                **stop_meta,
             }
 
     def active(self) -> Optional[Dict[str, Any]]:
