@@ -13,7 +13,9 @@ PLAN_KERNEL=""
 PLAN_OVERLAY=""
 PLAN_NEEDS_UNAME_CHANGE=0
 PLAN_NEEDS_OVERLAY_CHANGE=0
+PLAN_BLOCKED=0
 KICK_OOPS_DETECTED=0
+VRING_IRQ_MISSING_DETECTED=0
 
 usage() {
   cat <<'USAGE'
@@ -146,6 +148,17 @@ detect_kick_oops_signature() {
   return 1
 }
 
+detect_vring_irq_missing_signature() {
+  local hints
+
+  hints="$(dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg|oops|segfault|bug' | tail -n 160 || true)"
+  if printf '%s\n' "${hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|boot failed: -6'; then
+    return 0
+  fi
+
+  return 1
+}
+
 latest_backup() {
   ls -1t ${BACKUP_GLOB} 2>/dev/null | head -n 1 || true
 }
@@ -228,10 +241,15 @@ build_plan() {
   selected_kernel="$(get_uenv_key uname_r)"
   selected_overlay="$(get_uenv_key uboot_overlay_pru)"
   effective_kernel="${selected_kernel:-${running}}"
+  PLAN_BLOCKED=0
   KICK_OOPS_DETECTED=0
+  VRING_IRQ_MISSING_DETECTED=0
 
   if detect_kick_oops_signature; then
     KICK_OOPS_DETECTED=1
+  fi
+  if detect_vring_irq_missing_signature; then
+    VRING_IRQ_MISSING_DETECTED=1
   fi
 
   PLAN_REASON="No change required."
@@ -244,16 +262,14 @@ build_plan() {
     kernel_installed "${TARGET_KERNEL}" || die "--kernel ${TARGET_KERNEL} is not installed under /boot/vmlinuz-*"
     chosen_kernel="${TARGET_KERNEL}"
   else
-    chosen_kernel="${effective_kernel}"
-    if ! kernel_has_rproc_overlay "${chosen_kernel}"; then
-      chosen_kernel=""
+    chosen_kernel=""
+    if kernel_has_rproc_overlay "${effective_kernel}"; then
+      chosen_kernel="${effective_kernel}"
+    else
       while IFS= read -r candidate_kernel; do
         [[ -n "${candidate_kernel}" ]] || continue
         if kernel_has_rproc_overlay "${candidate_kernel}"; then
           chosen_kernel="${candidate_kernel}"
-          if [[ "${candidate_kernel}" == *"-ti-"* ]]; then
-            break
-          fi
         fi
       done < <(list_installed_kernels)
     fi
@@ -263,10 +279,11 @@ build_plan() {
     PLAN_REASON="No installed kernel exposes AM335X-PRU-RPROC overlays. Install a compatible TI kernel and retry."
     PLAN_KERNEL="${effective_kernel}"
     PLAN_OVERLAY="${selected_overlay}"
+    PLAN_BLOCKED=1
     return
   fi
 
-  if [[ -z "${TARGET_KERNEL}" ]] && [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+  if [[ -z "${TARGET_KERNEL}" ]] && [[ ${KICK_OOPS_DETECTED} -eq 1 || ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
     local newer_candidate=""
     while IFS= read -r candidate_kernel; do
       [[ -n "${candidate_kernel}" ]] || continue
@@ -295,17 +312,25 @@ build_plan() {
     if [[ -n "${best_overlay}" ]]; then
       chosen_overlay="${best_overlay}"
     else
-      chosen_overlay="${selected_overlay}"
+      chosen_overlay=""
     fi
   fi
 
   PLAN_KERNEL="${chosen_kernel}"
   PLAN_OVERLAY="${chosen_overlay}"
 
+  if [[ -z "${PLAN_OVERLAY}" ]]; then
+    PLAN_REASON="Selected kernel has no AM335X-PRU-RPROC overlay available for RPMsg remoteproc."
+    PLAN_BLOCKED=1
+    return
+  fi
+
   if [[ "${PLAN_KERNEL}" != "${effective_kernel}" ]]; then
     PLAN_NEEDS_UNAME_CHANGE=1
     if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
       PLAN_REASON="Current kernel shows RPMsg kick-path Oops; switch to alternate installed kernel with PRU RPROC overlay."
+    elif [[ ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
+      PLAN_REASON="Current kernel is missing RPMsg vring IRQ mapping; switch to alternate installed kernel with PRU RPROC overlay."
     else
       PLAN_REASON="Switch to installed kernel with PRU RPROC overlay support for RPMsg stability."
     fi
@@ -323,6 +348,8 @@ build_plan() {
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 0 && ${PLAN_NEEDS_OVERLAY_CHANGE} -eq 0 ]]; then
     if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
       PLAN_REASON="Kick-path Oops detected, but no newer installed kernel with PRU RPROC overlay was found."
+    elif [[ ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
+      PLAN_REASON="Vring IRQ failure detected, but no newer installed kernel with PRU RPROC overlay was found."
     else
       PLAN_REASON="No change required."
     fi
@@ -334,6 +361,9 @@ show_plan() {
 
   if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
     log "observed kick-path failure signature in recent dmesg."
+  fi
+  if [[ ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
+    log "observed vring IRQ failure signature in recent dmesg."
   fi
 
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 1 ]]; then
@@ -348,11 +378,12 @@ show_plan() {
     log "planned uboot_overlay_pru: no change"
   fi
 
-  if [[ "${PLAN_REASON}" == "No installed kernel exposes AM335X-PRU-RPROC overlays. Install a compatible TI kernel and retry." ]]; then
+  if [[ ${PLAN_BLOCKED} -eq 1 ]]; then
     cat <<'EONEXT'
 [pru_rpmsg_kernel_hop] next steps:
-  - install an available TI kernel package shown above (for example 5.10-ti or 6.1-ti)
+  - install an available TI kernel package that includes AM335X-PRU-RPROC overlays
   - confirm /boot/vmlinuz-<uname_r> exists
+  - confirm /boot/dtbs/<uname_r>/overlays includes AM335X-PRU-RPROC-*.dtbo
   - rerun --plan, then --apply, reboot, and redeploy firmware
 EONEXT
   fi
@@ -369,12 +400,16 @@ show_dmesg_summary() {
   log "last 120 dmesg lines (remoteproc/rpmsg/pru/oops):"
   printf '%s\n' "${hints}"
 
-  if printf '%s\n' "${hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|boot failed: -22|kick method not defined'; then
+  if printf '%s\n' "${hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|boot failed: -22|kick method not defined|irq vring not found|unable to get vring interrupt|boot failed: -6'; then
     log "detected RPMsg kick-path failure/oops signature. Kernel hop is recommended before further RPMsg traffic tests."
   fi
 }
 
 apply_plan() {
+  if [[ ${PLAN_BLOCKED} -eq 1 ]]; then
+    die "plan is blocked: ${PLAN_REASON}"
+  fi
+
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 0 && ${PLAN_NEEDS_OVERLAY_CHANGE} -eq 0 ]]; then
     log "nothing to apply"
     return
