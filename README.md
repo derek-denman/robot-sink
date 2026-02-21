@@ -104,6 +104,14 @@ Top-level docs pointer:
 
 - `docs/jetson.md`
 
+## Developer Docs / Agent Docs
+
+- `AGENTS.md` (repo start-here for future agents)
+- `docs/agents/INDEX.md` (agent handbook index)
+- `beaglebone/docs/` (BeagleBone bring-up and troubleshooting entry point)
+- `jetson/docs/` (Jetson bring-up and runtime entry point)
+- `docs/README.md` (top-level docs index)
+
 ## Repository Layout
 
 ```text
