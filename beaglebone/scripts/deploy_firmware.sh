@@ -12,8 +12,11 @@ PRU1_FW_DST="/lib/firmware/am335x-pru1-fw"
 
 DEFAULT_PRU0_RP="/sys/class/remoteproc/remoteproc1"
 DEFAULT_PRU1_RP="/sys/class/remoteproc/remoteproc2"
+RPROC_STOP_TIMEOUT="10s"
+RPROC_START_TIMEOUT="10s"
 
 FIXUP_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rpmsg_fixup.sh"
+KERNEL_HOP_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rpmsg_kernel_hop.sh"
 
 if [[ ! -f "${PRU0_FW_SRC}" || ! -f "${PRU1_FW_SRC}" ]]; then
   echo "[deploy_firmware] ERROR: firmware binaries are missing." >&2
@@ -74,8 +77,13 @@ print_kernel_overlay_context() {
 
 collect_filtered_dmesg() {
   if command -v dmesg >/dev/null 2>&1; then
-    dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg' | tail -n 50 || true
+    dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg|oops|segfault|bug' | tail -n 120 || true
   fi
+}
+
+print_rpmsg_nodes() {
+  echo "[deploy_firmware] rpmsg device nodes:"
+  ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || echo "  none"
 }
 
 print_rpmsg_boot_failure_guidance() {
@@ -96,11 +104,30 @@ print_rpmsg_boot_failure_guidance() {
   fi
 }
 
+print_rpmsg_kick_oops_guidance() {
+  echo "[deploy_firmware] detected kernel Oops in pru_rproc_kick during RPMsg traffic." >&2
+  echo "[deploy_firmware] remediation options:" >&2
+  if [[ -x "${KERNEL_HOP_SCRIPT}" ]]; then
+    echo "  1) Plan safer kernel/overlay combination:" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --plan" >&2
+    echo "  2) Apply plan, reboot, redeploy:" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --apply" >&2
+    echo "     sudo reboot" >&2
+    echo "     ./beaglebone/scripts/deploy_firmware.sh" >&2
+  fi
+  if [[ -x "${FIXUP_SCRIPT}" ]]; then
+    echo "  3) Fallback overlay/kernel remediation path:" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_fixup.sh --plan" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_fixup.sh --apply" >&2
+  fi
+}
+
 print_failure_diagnostics() {
   local dmesg_hints="$1"
 
   print_remoteproc_table >&2
   print_kernel_overlay_context >&2
+  print_rpmsg_nodes >&2
 
   if [[ -n "${dmesg_hints}" ]]; then
     echo "[deploy_firmware] recent kernel log (remoteproc/rproc-virtio/pru/rpmsg):" >&2
@@ -111,6 +138,10 @@ print_failure_diagnostics() {
 
   if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'kick method not defined|boot failed: -22|failed to probe subdevices.*-22'; then
     print_rpmsg_boot_failure_guidance
+  fi
+
+  if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|oops: [0-9]'; then
+    print_rpmsg_kick_oops_guidance
   fi
 }
 
@@ -157,10 +188,20 @@ stop_remoteproc_if_running() {
   state="$(sysfs_read "${rp}/state")"
   if [[ "${state}" == "running" ]]; then
     echo "[deploy_firmware] stopping ${rp}"
-    echo stop | sudo tee "${rp}/state" >/dev/null
+    if ! write_remoteproc_state "${rp}" "stop" "${RPROC_STOP_TIMEOUT}"; then
+      echo "[deploy_firmware] ERROR: timed out while stopping ${rp}." >&2
+      return 1
+    fi
+    state="$(sysfs_read "${rp}/state")"
+    if [[ "${state}" == "running" ]]; then
+      echo "[deploy_firmware] ERROR: ${rp} still running after stop request." >&2
+      return 1
+    fi
   else
     echo "[deploy_firmware] skip stop ${rp} (state=${state})"
   fi
+
+  return 0
 }
 
 set_remoteproc_firmware() {
@@ -172,6 +213,21 @@ set_remoteproc_firmware() {
   fi
 
   echo "${fw_basename}" | sudo tee "${rp}/firmware" >/dev/null || true
+}
+
+write_remoteproc_state() {
+  local rp="$1"
+  local desired="$2"
+  local timeout_value="$3"
+  local state_file="${rp}/state"
+  local write_cmd
+
+  write_cmd="echo '${desired}' > '${state_file}'"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${timeout_value}" sudo sh -c "${write_cmd}"
+  else
+    sudo sh -c "${write_cmd}"
+  fi
 }
 
 start_remoteproc() {
@@ -186,11 +242,13 @@ start_remoteproc() {
 
   if [[ "${state}" == "attached" ]]; then
     echo "[deploy_firmware] detaching ${rp} (state=attached)"
-    echo detach | sudo tee "${rp}/state" >/dev/null || true
+    if ! write_remoteproc_state "${rp}" "detach" "${RPROC_START_TIMEOUT}"; then
+      echo "[deploy_firmware] WARNING: detach timed out for ${rp}" >&2
+    fi
   fi
 
   echo "[deploy_firmware] starting ${rp}"
-  if ! echo start | sudo tee "${rp}/state" >/dev/null; then
+  if ! write_remoteproc_state "${rp}" "start" "${RPROC_START_TIMEOUT}"; then
     return 1
   fi
 
@@ -218,8 +276,16 @@ fi
 echo "[deploy_firmware] PRU0 remoteproc=${PRU0_RP}"
 echo "[deploy_firmware] PRU1 remoteproc=${PRU1_RP}"
 
-stop_remoteproc_if_running "${PRU0_RP}"
-stop_remoteproc_if_running "${PRU1_RP}"
+stop_failed=0
+stop_remoteproc_if_running "${PRU0_RP}" || stop_failed=1
+stop_remoteproc_if_running "${PRU1_RP}" || stop_failed=1
+
+if [[ ${stop_failed} -ne 0 ]]; then
+  echo "[deploy_firmware] ERROR: unable to stop one or more running PRU cores." >&2
+  echo "[deploy_firmware] hint: this often indicates kernel-side lockup; reboot before redeploying." >&2
+  print_failure_diagnostics "$(collect_filtered_dmesg)"
+  exit 1
+fi
 
 sudo install -m 0644 "${PRU0_FW_SRC}" "${PRU0_FW_DST}"
 sudo install -m 0644 "${PRU1_FW_SRC}" "${PRU1_FW_DST}"
