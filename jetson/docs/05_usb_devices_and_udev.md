@@ -54,7 +54,17 @@ udevadm info --query=property --name=/dev/ttyUSB1 | grep -E 'ID_VENDOR_ID|ID_MOD
 udevadm info --query=property --name=/dev/ttyACM0 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_MODEL'
 ```
 
-3. Add or refine the RoArm rule in `jetson/udev/99-robot-devices.rules` using that vendor/product (and serial if needed), then reload:
+3. If both adapters are `ID_VENDOR_ID=10c4` and `ID_MODEL_ID=ea60`, use `ID_MODEL` to split:
+
+- `CP2102_USB_to_UART_Bridge_Controller` -> `/dev/ttyRPLIDAR`
+- `CP2102N_USB_to_UART_Bridge_Controller` -> `/dev/ttyROARM`
+
+4. If both report the same `ID_MODEL`, pin by serial:
+
+- Add `ATTRS{serial}=="<rplidar-serial>"` to the RPLIDAR rule
+- Add `ATTRS{serial}=="<roarm-serial>"` to the RoArm rule
+
+5. Reload rules:
 
 ```bash
 ./jetson/scripts/setup_udev_rules.sh

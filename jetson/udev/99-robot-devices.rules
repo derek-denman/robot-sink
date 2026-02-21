@@ -3,12 +3,17 @@
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 
-# RPLIDAR A1 (commonly CP2102 USB-UART bridge)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", GROUP="dialout", MODE="0660", SYMLINK+="ttyRPLIDAR"
+# RPLIDAR A1 / RoArm on CP210x adapters (10c4:ea60).
+# Common split on this stack:
+# - RPLIDAR appears as CP2102
+# - RoArm appears as CP2102N
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MODEL}=="CP2102_USB_to_UART_Bridge_Controller", GROUP="dialout", MODE="0660", SYMLINK+="ttyRPLIDAR"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MODEL}=="CP2102N_USB_to_UART_Bridge_Controller", GROUP="dialout", MODE="0660", SYMLINK+="ttyROARM"
 
 # RoArm-M2-S (common CH34x/CH9102 USB-UART bridges)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", GROUP="dialout", MODE="0660", SYMLINK+="ttyROARM"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", GROUP="dialout", MODE="0660", SYMLINK+="ttyROARM"
 
-# If you have multiple devices with the same USB-UART chipset,
-# add ATTRS{serial}=="<device-serial>" to the matching rule.
+# If both devices report the same ID_MODEL, pin by serial instead:
+#   ATTRS{serial}=="<lidar-serial>"  -> ttyRPLIDAR
+#   ATTRS{serial}=="<roarm-serial>"  -> ttyROARM
