@@ -59,7 +59,7 @@ list_installed_kernels() {
   for image in /boot/vmlinuz-*; do
     [[ -e "${image}" ]] || continue
     basename "${image}" | sed 's/^vmlinuz-//'
-  done | LC_ALL=C sort
+  done | LC_ALL=C sort -V
 }
 
 kernel_installed() {
@@ -125,6 +125,14 @@ pick_best_rproc_overlay() {
 kernel_has_rproc_overlay() {
   local kernel="$1"
   pick_best_rproc_overlay "${kernel}" >/dev/null 2>&1
+}
+
+kernel_version_newer_than() {
+  local candidate="$1"
+  local current="$2"
+
+  [[ "${candidate}" != "${current}" ]] || return 1
+  [[ "$(printf '%s\n%s\n' "${current}" "${candidate}" | LC_ALL=C sort -V | tail -n 1)" == "${candidate}" ]]
 }
 
 detect_kick_oops_signature() {
@@ -259,14 +267,23 @@ build_plan() {
   fi
 
   if [[ -z "${TARGET_KERNEL}" ]] && [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+    local newer_candidate=""
     while IFS= read -r candidate_kernel; do
       [[ -n "${candidate_kernel}" ]] || continue
       [[ "${candidate_kernel}" == "${effective_kernel}" ]] && continue
+
+      if ! kernel_version_newer_than "${candidate_kernel}" "${effective_kernel}"; then
+        continue
+      fi
+
       if kernel_has_rproc_overlay "${candidate_kernel}"; then
-        chosen_kernel="${candidate_kernel}"
-        break
+        newer_candidate="${candidate_kernel}"
       fi
     done < <(list_installed_kernels)
+
+    if [[ -n "${newer_candidate}" ]]; then
+      chosen_kernel="${newer_candidate}"
+    fi
   fi
 
   if [[ -n "${TARGET_OVERLAY}" ]]; then
@@ -304,7 +321,11 @@ build_plan() {
   fi
 
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 0 && ${PLAN_NEEDS_OVERLAY_CHANGE} -eq 0 ]]; then
-    PLAN_REASON="No change required."
+    if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+      PLAN_REASON="Kick-path Oops detected, but no newer installed kernel with PRU RPROC overlay was found."
+    else
+      PLAN_REASON="No change required."
+    fi
   fi
 }
 
