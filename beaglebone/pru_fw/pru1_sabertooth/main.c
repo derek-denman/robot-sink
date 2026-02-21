@@ -37,8 +37,8 @@ volatile register uint32_t __R31;
 #define CHAN_PORT 31
 
 #define HOST_INT ((uint32_t)1 << 30)
-#define TO_ARM_HOST 16
-#define FROM_ARM_HOST 17
+#define TO_ARM_HOST 18
+#define FROM_ARM_HOST 19
 
 #define PRU_CLOCK_HZ 200000000u
 #define MAIN_LOOP_US 1000u
