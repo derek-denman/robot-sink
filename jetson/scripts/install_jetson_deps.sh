@@ -103,7 +103,9 @@ run_sudo apt-get install -y \
   udev \
   iptables \
   chrony \
-  libusb-1.0-0-dev
+  libusb-1.0-0-dev \
+  python3-aiohttp \
+  python3-yaml
 
 if [[ "${CODENAME}" == "jammy" ]]; then
   log "Configuring ROS 2 apt repository for Humble."
@@ -120,6 +122,12 @@ if [[ "${CODENAME}" == "jammy" ]]; then
   run_sudo apt-get install -y \
     ros-humble-ros-base \
     ros-humble-rplidar-ros
+
+  if pkg_available ros-humble-foxglove-bridge; then
+    run_sudo apt-get install -y ros-humble-foxglove-bridge
+  else
+    log "Package ros-humble-foxglove-bridge not found in apt cache; skipping."
+  fi
 
   if pkg_available ros-dev-tools; then
     run_sudo apt-get install -y ros-dev-tools

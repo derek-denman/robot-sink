@@ -1,5 +1,5 @@
 [Unit]
-Description=Robot Jetson Bring-Up Runtime Stack
+Description=Robot Jetson Runtime Stack (Sensors, Console, Bridge)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,6 +10,10 @@ WorkingDirectory=__ROBOT_ROOT__
 Environment=ROBOT_ROOT=__ROBOT_ROOT__
 Environment=ROS_DISTRO=humble
 Environment=PYTHONUNBUFFERED=1
+Environment=ROBOT_CONSOLE_CONFIG=__ROBOT_ROOT__/jetson/console/console_config.yaml
+Environment=ROBOT_CONSOLE_WEB_ROOT=__ROBOT_ROOT__/jetson/console/web
+Environment=ROBOT_CONSOLE_PORT=8080
+Environment=FOXGLOVE_PORT=8765
 ExecStart=__ROBOT_ROOT__/jetson/scripts/run_stack.sh
 Restart=on-failure
 RestartSec=5

@@ -31,6 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${JETSON_LOG_DIR:-${REPO_ROOT}/jetson/logs}"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
+export ROBOT_ROOT="${ROBOT_ROOT:-${REPO_ROOT}}"
+ROBOT_CONSOLE_CONFIG="${ROBOT_CONSOLE_CONFIG:-${ROBOT_ROOT}/jetson/console/console_config.yaml}"
+ROBOT_CONSOLE_WEB_ROOT="${ROBOT_CONSOLE_WEB_ROOT:-${ROBOT_ROOT}/jetson/console/web}"
+FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
+export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT
 
 mkdir -p "${LOG_DIR}"
 
@@ -86,6 +91,22 @@ ros_pkg_exists() {
   local pkg="$1"
   command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix "${pkg}" >/dev/null 2>&1
 }
+
+if [[ -n "${FOXGLOVE_CMD:-}" ]]; then
+  start_cmd "foxglove" "${FOXGLOVE_CMD}"
+elif ros_pkg_exists foxglove_bridge; then
+  start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+else
+  start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove_bridge not found; bridge unavailable'"
+fi
+
+if [[ -n "${ROBOT_CONSOLE_CMD:-}" ]]; then
+  start_cmd "robot-console" "${ROBOT_CONSOLE_CMD}"
+elif ros_pkg_exists robot_console; then
+  start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+else
+  start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot_console package missing; build ros_ws first'"
+fi
 
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
