@@ -50,6 +50,12 @@ From repo root on your dev machine:
 ./jetson/scripts/sync_to_jetson.sh ubuntu@JETSON_IP:/home/ubuntu/robot-sink
 ```
 
+Or sync both Jetson + BeagleBone in one step:
+
+```bash
+./sync_nodes.sh
+```
+
 ### 3) SSH to Jetson and run bring-up scripts
 
 ```bash

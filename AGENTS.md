@@ -19,6 +19,7 @@
 - `docs/`: top-level project docs (`bringup.md`, `calibration.md`, `safety.md`, `demo_runbook.md`, `jetson.md`).
 - `journal/`: dated engineering notes (`journal/YYYY-MM-DD.md`).
 - `sync_bb.sh`: repo-root helper to sync BeagleBone payload over SSH/rsync.
+- `sync_nodes.sh`: repo-root helper to sync Jetson + BeagleBone in one command.
 - `hardware/`, `bom/`: hardware assets and bill-of-materials references.
 
 ## Golden Commands
@@ -39,6 +40,16 @@
 ```bash
 # Uses exclude list at jetson/scripts/sync_to_jetson.exclude
 ./jetson/scripts/sync_to_jetson.sh --dry-run ubuntu@JETSON_IP:/home/ubuntu/robot-sink
+```
+
+### Sync Both Nodes
+```bash
+./sync_nodes.sh
+```
+```bash
+./sync_nodes.sh --dry-run
+./sync_nodes.sh --target jetson --jetson ubuntu@JETSON_IP:/home/ubuntu/robot-sink
+./sync_nodes.sh --target beaglebone --bb-host 192.168.7.2 --bb-user debian --bb-dest ~/robot-sink
 ```
 
 ### Jetson run
