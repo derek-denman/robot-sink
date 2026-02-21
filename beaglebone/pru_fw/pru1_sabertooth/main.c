@@ -343,7 +343,7 @@ static void send_message(const bbb_msg_t *msg)
                          g_last_dst,
                          g_last_src,
                          (void *)msg,
-                         (uint16_t)sizeof(*msg));
+                         (uint16_t)BBB_MSG_WIRE_SIZE);
 }
 
 static void send_ack(uint16_t request_sequence, int16_t status, uint16_t detail)
@@ -502,7 +502,7 @@ static void process_rpmsg(void)
     uint16_t src;
     uint16_t dst;
     rpmsg_len_t len = 0u;
-    uint8_t payload[sizeof(bbb_msg_t)];
+    uint8_t payload[BBB_MSG_WIRE_SIZE];
 
     while (pru_rpmsg_receive(&g_transport,
                              &src,
@@ -511,11 +511,12 @@ static void process_rpmsg(void)
                              &len) == PRU_RPMSG_SUCCESS) {
         bbb_msg_t msg;
 
-        if (len < (rpmsg_len_t)sizeof(msg)) {
+        if (len < (rpmsg_len_t)BBB_MSG_WIRE_SIZE) {
             continue;
         }
 
-        memcpy(&msg, payload, sizeof(msg));
+        memset(&msg, 0, sizeof(msg));
+        memcpy(&msg, payload, BBB_MSG_WIRE_SIZE);
         g_last_src = src;
         g_last_dst = dst;
         g_has_host_peer = 1u;
