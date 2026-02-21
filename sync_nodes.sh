@@ -158,14 +158,12 @@ sync_jetson() {
   ssh "${remote_host}" "mkdir -p '${remote_path}'"
 
   local -a required_paths=(
+    beaglebone
     jetson
     ros_ws
     docs
     README.md
     sync_bb.sh
-  )
-  local -a optional_paths=(
-    beaglebone/host_daemon/config.yaml
   )
 
   local src rel_path
@@ -185,14 +183,6 @@ sync_jetson() {
     fi
   done
 
-  for rel_path in "${optional_paths[@]}"; do
-    src="${ROOT}/${rel_path}"
-    if [[ -e "${src}" ]]; then
-      ssh "${remote_host}" "mkdir -p '${remote_path}/$(dirname "${rel_path}")'"
-      log "jetson sync: optional ${rel_path}"
-      rsync "${RSYNC_BASE_OPTS[@]}" "${src}" "${remote_host}:${remote_path}/${rel_path}"
-    fi
-  done
 }
 
 sync_beaglebone() {
