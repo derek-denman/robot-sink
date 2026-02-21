@@ -1,0 +1,856 @@
+import asyncio
+import copy
+import json
+import os
+import signal
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import rclpy
+import yaml
+from aiohttp import WSMsgType, web
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+
+from .diagnostics import DiagnosticsProvider
+from .modes import ModeManager, RobotMode
+from .recording import RosbagRecorder
+from .ros_adapters import RosAdapters
+
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "server": {
+        "host": "0.0.0.0",
+        "http_port": 8080,
+        "websocket_path": "/ws",
+        "web_root": "",
+    },
+    "foxglove": {
+        "port": 8765,
+    },
+    "safety": {
+        "command_timeout_sec": 0.8,
+    },
+    "topics": {
+        "cmd_vel": "/cmd_vel",
+        "scan": "/scan",
+        "odom": "/odom",
+        "tf": "/tf",
+        "tf_static": "/tf_static",
+        "camera_topics": ["/oak/rgb/image_raw", "/oak/stereo/image_raw"],
+        "navigate_to_pose": "/navigate_to_pose",
+        "initial_pose": "/initialpose",
+        "slam_pause": "/slam_toolbox/pause_new_measurements",
+        "slam_resume": "/slam_toolbox/resume",
+        "slam_save_map": "/slam_toolbox/save_map",
+        "clear_costmap_local": "/local_costmap/clear_entirely_local_costmap",
+        "clear_costmap_global": "/global_costmap/clear_entirely_global_costmap",
+        "arm_gripper": "/arm/gripper_cmd",
+        "arm_pose": "/arm/pose_cmd",
+        "arm_joint_jog": "/arm/joint_jog",
+        "arm_stop": "/arm/stop",
+    },
+    "bagging": {
+        "storage_path": "~/robot-sink/data/bags",
+        "default_topics": ["/cmd_vel", "/odom", "/scan", "/tf", "/tf_static"],
+    },
+    "stack": {
+        "start_cmd": "",
+        "stop_cmd": "",
+    },
+    "mapping": {
+        "switch_to_localization_cmd": "",
+    },
+    "reliability": {
+        "temp_paths": [],
+    },
+}
+
+
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def load_console_config(config_file: Path) -> Dict[str, Any]:
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    if config_file.exists():
+        raw = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+        if isinstance(raw, dict):
+            deep_merge(config, raw)
+    return config
+
+
+class RobotConsoleApiNode(Node):
+    def __init__(self) -> None:
+        super().__init__("robot_console_api")
+
+        self.declare_parameter("config_file", "")
+        self.declare_parameter("web_root", "")
+        self.declare_parameter("http_host", "")
+        self.declare_parameter("http_port", 0)
+        self.declare_parameter("foxglove_port", 0)
+
+        self._config = self._resolve_config()
+
+        safety_cfg = self._config.get("safety", {})
+        command_timeout = float(safety_cfg.get("command_timeout_sec", 0.8))
+
+        bag_cfg = self._config.get("bagging", {})
+        bag_path = Path(bag_cfg.get("storage_path", "~/robot-sink/data/bags")).expanduser()
+
+        self.mode_manager = ModeManager(command_timeout_sec=command_timeout)
+        self.adapters = RosAdapters(self, self._config)
+        self.recorder = RosbagRecorder(
+            bag_path,
+            default_topics=bag_cfg.get("default_topics", []),
+        )
+        self.diagnostics = DiagnosticsProvider(
+            adapters=self.adapters,
+            recorder=self.recorder,
+            bag_path=bag_path,
+            temp_paths=self._config.get("reliability", {}).get("temp_paths", []),
+        )
+
+        self._ws_clients: set[web.WebSocketResponse] = set()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._state_lock = threading.Lock()
+
+        self._commissioning_results: Dict[str, Dict[str, Any]] = {}
+        self._mapping_state: Dict[str, Any] = {
+            "slam_active": False,
+            "localization_mode": False,
+            "last_saved_map": None,
+        }
+        self._pick_place_state: Dict[str, Any] = {
+            "active": False,
+            "stage": "idle",
+            "retry_count": 0,
+            "last_target": {"x": None, "y": None, "z": None, "confidence": None},
+        }
+        self._demo_state: Dict[str, Any] = {
+            "active": False,
+            "target_count": 0,
+            "completed_count": 0,
+        }
+        self._demo_cancel = threading.Event()
+
+        self._heartbeat_timer = self.create_timer(0.1, self._watchdog_tick)
+        self._status_timer = self.create_timer(0.5, self._status_tick)
+
+        self.get_logger().info(
+            f"Robot console API configured on {self._config['server']['host']}:"
+            f"{self._config['server']['http_port']}"
+        )
+
+    def _resolve_config(self) -> Dict[str, Any]:
+        robot_root = os.environ.get("ROBOT_ROOT", str(Path.cwd()))
+
+        param_config = self.get_parameter("config_file").get_parameter_value().string_value
+        env_config = os.environ.get("ROBOT_CONSOLE_CONFIG", "")
+        config_file = param_config or env_config or f"{robot_root}/jetson/console/console_config.yaml"
+
+        config = load_console_config(Path(config_file).expanduser())
+
+        param_web_root = self.get_parameter("web_root").get_parameter_value().string_value
+        env_web_root = os.environ.get("ROBOT_CONSOLE_WEB_ROOT", "")
+        config["server"]["web_root"] = (
+            param_web_root
+            or env_web_root
+            or config["server"].get("web_root")
+            or f"{robot_root}/jetson/console/web"
+        )
+
+        param_http_host = self.get_parameter("http_host").get_parameter_value().string_value
+        if param_http_host:
+            config["server"]["host"] = param_http_host
+
+        param_http_port = self.get_parameter("http_port").get_parameter_value().integer_value
+        if int(param_http_port) > 0:
+            config["server"]["http_port"] = int(param_http_port)
+
+        param_foxglove_port = self.get_parameter("foxglove_port").get_parameter_value().integer_value
+        if int(param_foxglove_port) > 0:
+            config["foxglove"]["port"] = int(param_foxglove_port)
+
+        return config
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        return self._config
+
+    def attach_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._state_lock:
+            mapping_state = dict(self._mapping_state)
+            pick_place_state = json.loads(json.dumps(self._pick_place_state))
+            demo_state = dict(self._demo_state)
+            commissioning = dict(self._commissioning_results)
+
+        encoder_last = self.adapters.latest_encoder_update_unix()
+        health = self.diagnostics.health_summary()
+        reliability = self.diagnostics.reliability_snapshot()
+        nav_status = self.adapters.navigation_status()
+
+        return {
+            "timestamp_unix": time.time(),
+            "mode": self.mode_manager.current_mode().value,
+            "safety": self.mode_manager.safety_snapshot().to_dict(),
+            "health": health,
+            "dashboard": {
+                "base_connected": health.get("base_connected", False),
+                "last_encoder_update_unix": encoder_last,
+                "topic_rates": self.adapters.topic_rates(),
+                "nav_state": nav_status.get("state"),
+                "temperatures": reliability.get("temperatures_c", []),
+            },
+            "mapping": mapping_state,
+            "navigation": nav_status,
+            "pick_place": pick_place_state,
+            "demo": demo_state,
+            "recording": {
+                "status": self.recorder.status(),
+                "recent": self.recorder.list_recent(limit=8),
+            },
+            "reliability": reliability,
+            "commissioning": commissioning,
+            "foxglove": {
+                "port": self._config.get("foxglove", {}).get("port", 8765),
+                "url_template": "ws://<jetson>:" + str(self._config.get("foxglove", {}).get("port", 8765)),
+            },
+        }
+
+    def _watchdog_tick(self) -> None:
+        if self.mode_manager.check_watchdog():
+            self.adapters.publish_stop()
+            self.get_logger().warn("Motion watchdog timeout. Stop command issued and robot disarmed.")
+            self._queue_status_push()
+
+    def _status_tick(self) -> None:
+        self._queue_status_push()
+
+    def _queue_status_push(self) -> None:
+        if not self._loop or not self._ws_clients:
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(self.broadcast_status(), self._loop)
+        except RuntimeError:
+            return
+
+    async def broadcast_status(self) -> None:
+        if not self._ws_clients:
+            return
+
+        payload = json.dumps({"type": "status", "data": self.snapshot()})
+
+        dead = []
+        for ws in self._ws_clients:
+            try:
+                await ws.send_str(payload)
+            except ConnectionResetError:
+                dead.append(ws)
+            except RuntimeError:
+                dead.append(ws)
+
+        for ws in dead:
+            self._ws_clients.discard(ws)
+
+    def stop_all(self) -> Dict[str, Any]:
+        self.adapters.publish_stop()
+        nav_result = self.adapters.cancel_navigation_goal()
+        arm_result = self.adapters.stop_arm()
+        self.mode_manager.disarm(reason="stop_all")
+        return {
+            "ok": True,
+            "navigation": nav_result,
+            "arm": arm_result,
+        }
+
+    def run_shell_command(self, cmd: str, background: bool = False) -> Dict[str, Any]:
+        cmd = (cmd or "").strip()
+        if not cmd:
+            return {"ok": False, "error": "command_not_configured"}
+
+        if background:
+            subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return {"ok": True, "cmd": cmd}
+
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", cmd],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "command_timeout", "cmd": cmd}
+
+        return {
+            "ok": result.returncode == 0,
+            "cmd": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-400:],
+            "stderr": result.stderr[-400:],
+        }
+
+    def run_stack_command(self, command_key: str, background: bool = False) -> Dict[str, Any]:
+        cmd = self._config.get("stack", {}).get(command_key, "").strip()
+        if not cmd:
+            return {
+                "ok": False,
+                "error": f"stack_{command_key}_not_configured",
+            }
+
+        return self.run_shell_command(cmd, background=background)
+
+    def run_commissioning_check(self, check_id: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "check": check_id,
+            "timestamp_unix": time.time(),
+            "passed": False,
+            "expected": "",
+            "observed": "",
+        }
+
+        if check_id == "encoder_direction":
+            age = self.adapters.topic_age_sec("odom")
+            result["expected"] = "Odom/encoder updates observed while wheel spins"
+            result["observed"] = f"odom_age_sec={age}"
+            result["passed"] = age is not None and age < 2.0
+
+        elif check_id == "motor_tick":
+            result["expected"] = "Low-duty forward tick and stop"
+            if self.mode_manager.arm():
+                self.adapters.publish_cmd_vel(0.08, 0.0)
+                time.sleep(0.4)
+                self.adapters.publish_stop()
+                self.mode_manager.disarm("motor_tick_complete")
+                result["observed"] = "published cmd_vel(0.08,0.0) for 0.4s then stop"
+                result["passed"] = True
+            else:
+                result["observed"] = "cannot arm while estop latched"
+
+        elif check_id == "estop":
+            result["expected"] = "Immediate stop and estop latch"
+            self.mode_manager.estop()
+            self.adapters.publish_stop()
+            result["observed"] = "estop latched and stop command sent"
+            result["passed"] = True
+
+        elif check_id == "watchdog":
+            result["expected"] = "Disarm after command timeout"
+            timeout = self.mode_manager.command_timeout_sec()
+            armed = self.mode_manager.arm()
+            if not armed:
+                result["observed"] = "arm failed (estop latched)"
+            else:
+                self.mode_manager.record_motion_command()
+                time.sleep(timeout + 0.25)
+                timed_out = self.mode_manager.check_watchdog()
+                if timed_out:
+                    self.adapters.publish_stop()
+                result["observed"] = f"watchdog_timeout_triggered={timed_out}"
+                result["passed"] = timed_out
+
+        elif check_id == "tf_sanity":
+            frames_ok = self.adapters.tf_has_required_frames(["map", "odom", "base_link"])
+            result["expected"] = "map, odom, and base_link frames available"
+            result["observed"] = f"frames_ok={frames_ok}"
+            result["passed"] = frames_ok
+
+        else:
+            result["expected"] = "Known check id"
+            result["observed"] = "unknown check"
+
+        with self._state_lock:
+            self._commissioning_results[check_id] = result
+
+        return result
+
+    def set_mapping_state(self, **kwargs: Any) -> None:
+        with self._state_lock:
+            self._mapping_state.update(kwargs)
+
+    def set_pick_place_state(self, **kwargs: Any) -> None:
+        with self._state_lock:
+            self._pick_place_state.update(kwargs)
+
+    def start_demo(self, target_count: int) -> Dict[str, Any]:
+        with self._state_lock:
+            if self._demo_state["active"]:
+                return {"ok": False, "error": "demo_already_running"}
+
+            self._demo_state = {
+                "active": True,
+                "target_count": int(target_count),
+                "completed_count": 0,
+            }
+            self._demo_cancel.clear()
+
+        thread = threading.Thread(target=self._run_demo_worker, args=(int(target_count),), daemon=True)
+        thread.start()
+        return {"ok": True, "state": self._demo_state}
+
+    def stop_demo(self) -> Dict[str, Any]:
+        self._demo_cancel.set()
+        with self._state_lock:
+            self._demo_state["active"] = False
+        return {"ok": True, "state": self._demo_state}
+
+    def _run_demo_worker(self, target_count: int) -> None:
+        for idx in range(max(0, target_count)):
+            if self._demo_cancel.is_set():
+                break
+            time.sleep(1.0)
+            with self._state_lock:
+                self._demo_state["completed_count"] = idx + 1
+            self._queue_status_push()
+
+        with self._state_lock:
+            self._demo_state["active"] = False
+
+        self._queue_status_push()
+
+    def shutdown(self) -> None:
+        try:
+            self.adapters.publish_stop()
+        except Exception:
+            pass
+
+        try:
+            self.recorder.stop()
+        except Exception:
+            pass
+
+
+async def _json_request(request: web.Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            return payload
+        return {}
+    except Exception:
+        return {}
+
+
+def _app_response(ok: bool, **kwargs: Any) -> web.Response:
+    body = {"ok": ok}
+    body.update(kwargs)
+    return web.json_response(body)
+
+
+def create_app(node: RobotConsoleApiNode) -> web.Application:
+    app = web.Application()
+
+    async def get_status(_request: web.Request) -> web.Response:
+        return web.json_response(node.snapshot())
+
+    async def get_config(_request: web.Request) -> web.Response:
+        return web.json_response(node.config)
+
+    async def set_mode(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        mode_value = payload.get("mode", "")
+        try:
+            mode = node.mode_manager.set_mode(mode_value)
+        except ValueError as exc:
+            return _app_response(False, error=str(exc))
+        node._queue_status_push()
+        return _app_response(True, mode=mode.value)
+
+    async def arm(_request: web.Request) -> web.Response:
+        if node.mode_manager.arm():
+            node._queue_status_push()
+            return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+        return _app_response(False, error="estop_latched")
+
+    async def disarm(_request: web.Request) -> web.Response:
+        node.mode_manager.disarm(reason="operator")
+        node.adapters.publish_stop()
+        node._queue_status_push()
+        return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+
+    async def estop(_request: web.Request) -> web.Response:
+        node.mode_manager.estop()
+        node.adapters.publish_stop()
+        node.adapters.stop_arm()
+        node.adapters.cancel_navigation_goal()
+        node._queue_status_push()
+        return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+
+    async def reset_estop(_request: web.Request) -> web.Response:
+        node.mode_manager.reset_estop()
+        node._queue_status_push()
+        return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+
+    async def stop_all(_request: web.Request) -> web.Response:
+        result = node.stop_all()
+        node._queue_status_push()
+        return _app_response(True, result=result)
+
+    async def teleop_cmd_vel(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        if node.mode_manager.current_mode() != RobotMode.MANUAL:
+            return _app_response(False, error="manual_mode_required")
+        if not node.mode_manager.should_allow_motion():
+            return _app_response(False, error="robot_not_armed")
+
+        linear = float(payload.get("linear_x", 0.0))
+        angular = float(payload.get("angular_z", 0.0))
+
+        node.adapters.publish_cmd_vel(linear, angular)
+        node.mode_manager.record_motion_command()
+        return _app_response(True, linear_x=linear, angular_z=angular)
+
+    async def set_initial_pose(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        x = float(payload.get("x", 0.0))
+        y = float(payload.get("y", 0.0))
+        yaw = float(payload.get("yaw", 0.0))
+        frame_id = payload.get("frame_id", "map")
+
+        node.adapters.set_initial_pose(x=x, y=y, yaw=yaw, frame_id=frame_id)
+        return _app_response(True, pose={"x": x, "y": y, "yaw": yaw, "frame_id": frame_id})
+
+    async def nav_goal(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        x = float(payload.get("x", 0.0))
+        y = float(payload.get("y", 0.0))
+        yaw = float(payload.get("yaw", 0.0))
+
+        result = node.adapters.send_navigation_goal(x=x, y=y, yaw=yaw)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def nav_cancel(_request: web.Request) -> web.Response:
+        result = node.adapters.cancel_navigation_goal()
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def clear_costmaps(_request: web.Request) -> web.Response:
+        result = node.adapters.clear_costmaps()
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def mapping_start(_request: web.Request) -> web.Response:
+        result = node.adapters.start_slam()
+        node.set_mapping_state(slam_active=result.get("ok", False), localization_mode=False)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def mapping_stop(_request: web.Request) -> web.Response:
+        result = node.adapters.stop_slam()
+        node.set_mapping_state(slam_active=False)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def mapping_save(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        map_name = str(payload.get("filename", "map_snapshot"))
+        result = node.adapters.save_map(map_name)
+        if result.get("ok"):
+            node.set_mapping_state(last_saved_map=map_name)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def mapping_switch_localization(_request: web.Request) -> web.Response:
+        cmd = node.config.get("mapping", {}).get("switch_to_localization_cmd", "").strip()
+        if cmd:
+            run_result = node.run_shell_command(cmd, background=False)
+            ok = run_result.get("ok", False)
+        else:
+            run_result = {
+                "ok": False,
+                "error": "switch_to_localization_cmd_not_configured",
+            }
+            ok = False
+
+        node.set_mapping_state(localization_mode=ok)
+        node._queue_status_push()
+        return _app_response(ok, result=run_result)
+
+    async def checklist_run(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        check_id = str(payload.get("check", ""))
+        result = await asyncio.to_thread(node.run_commissioning_check, check_id)
+        node._queue_status_push()
+        return _app_response(result.get("passed", False), result=result)
+
+    async def arm_gripper(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        command = str(payload.get("command", "open"))
+        result = node.adapters.command_gripper(command)
+        return _app_response(result.get("ok", False), result=result)
+
+    async def arm_pose(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        pose_name = str(payload.get("pose", "stow"))
+        result = node.adapters.command_named_pose(pose_name)
+        return _app_response(result.get("ok", False), result=result)
+
+    async def arm_jog(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        joint = str(payload.get("joint", "j1"))
+        delta = float(payload.get("delta", 0.0))
+        result = node.adapters.jog_joint(joint=joint, delta=delta)
+        return _app_response(result.get("ok", False), result=result)
+
+    async def arm_stop(_request: web.Request) -> web.Response:
+        result = node.adapters.stop_arm()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def pick_place_start(_request: web.Request) -> web.Response:
+        node.set_pick_place_state(active=True, stage="seeking", retry_count=0)
+        node._queue_status_push()
+        return _app_response(True, state=node.snapshot().get("pick_place"))
+
+    async def pick_place_stop(_request: web.Request) -> web.Response:
+        node.set_pick_place_state(active=False, stage="stopped")
+        node._queue_status_push()
+        return _app_response(True, state=node.snapshot().get("pick_place"))
+
+    async def pick_place_skip(_request: web.Request) -> web.Response:
+        node.set_pick_place_state(stage="skip_requested")
+        node._queue_status_push()
+        return _app_response(True, state=node.snapshot().get("pick_place"))
+
+    async def pick_place_retry(_request: web.Request) -> web.Response:
+        current = node.snapshot().get("pick_place", {})
+        retry_count = int(current.get("retry_count", 0)) + 1
+        node.set_pick_place_state(stage="retry_requested", retry_count=retry_count)
+        node._queue_status_push()
+        return _app_response(True, state=node.snapshot().get("pick_place"))
+
+    async def pick_place_abort(_request: web.Request) -> web.Response:
+        node.set_pick_place_state(active=False, stage="aborted")
+        node._queue_status_push()
+        return _app_response(True, state=node.snapshot().get("pick_place"))
+
+    async def recording_start(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        tags = str(payload.get("tags", "untagged"))
+        topics = payload.get("topics", [])
+        if not isinstance(topics, list):
+            topics = []
+
+        result = node.recorder.start(tag=tags, topics=topics)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def recording_stop(_request: web.Request) -> web.Response:
+        result = node.recorder.stop()
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def recording_list(request: web.Request) -> web.Response:
+        try:
+            limit = int(request.query.get("limit", "10"))
+        except ValueError:
+            limit = 10
+        entries = node.recorder.list_recent(limit=limit)
+        return _app_response(True, recordings=entries)
+
+    async def recording_replay_hint(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        bag_path = str(payload.get("path", ""))
+        return _app_response(True, command=node.recorder.replay_hint(bag_path))
+
+    async def demo_run(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        count = int(payload.get("count", 1))
+        result = node.start_demo(count)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def demo_stop(_request: web.Request) -> web.Response:
+        result = node.stop_demo()
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def stack_start(_request: web.Request) -> web.Response:
+        result = node.run_stack_command("start_cmd", background=True)
+        return _app_response(result.get("ok", False), result=result)
+
+    async def stack_stop(_request: web.Request) -> web.Response:
+        result = node.run_stack_command("stop_cmd", background=False)
+        return _app_response(result.get("ok", False), result=result)
+
+    async def ws_handler(request: web.Request) -> web.StreamResponse:
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        node._ws_clients.add(ws)
+        await ws.send_json({"type": "status", "data": node.snapshot()})
+
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT and msg.data == "ping":
+                    await ws.send_str("pong")
+                elif msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            node._ws_clients.discard(ws)
+
+        return ws
+
+    web_root = Path(node.config.get("server", {}).get("web_root", "")).expanduser()
+    layout_root = web_root.parent / "layouts"
+
+    async def index(_request: web.Request) -> web.Response:
+        return web.FileResponse(web_root / "index.html")
+
+    async def static_files(request: web.Request) -> web.Response:
+        path = request.match_info.get("path", "")
+        candidate = (web_root / path).resolve()
+        web_root_resolved = web_root.resolve()
+
+        if not str(candidate).startswith(str(web_root_resolved)):
+            raise web.HTTPForbidden()
+
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+
+        return web.FileResponse(web_root / "index.html")
+
+    async def layout_files(request: web.Request) -> web.Response:
+        path = request.match_info.get("path", "")
+        candidate = (layout_root / path).resolve()
+        layout_root_resolved = layout_root.resolve()
+
+        if not str(candidate).startswith(str(layout_root_resolved)):
+            raise web.HTTPForbidden()
+
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+
+        raise web.HTTPNotFound()
+
+    app.router.add_get("/api/status", get_status)
+    app.router.add_get("/api/config", get_config)
+
+    app.router.add_post("/api/mode", set_mode)
+
+    app.router.add_post("/api/safety/arm", arm)
+    app.router.add_post("/api/safety/disarm", disarm)
+    app.router.add_post("/api/safety/estop", estop)
+    app.router.add_post("/api/safety/reset_estop", reset_estop)
+    app.router.add_post("/api/stop_all", stop_all)
+
+    app.router.add_post("/api/teleop/cmd_vel", teleop_cmd_vel)
+
+    app.router.add_post("/api/localization/set_initial_pose", set_initial_pose)
+
+    app.router.add_post("/api/nav/goal", nav_goal)
+    app.router.add_post("/api/nav/cancel", nav_cancel)
+    app.router.add_post("/api/nav/clear_costmaps", clear_costmaps)
+
+    app.router.add_post("/api/mapping/start", mapping_start)
+    app.router.add_post("/api/mapping/stop", mapping_stop)
+    app.router.add_post("/api/mapping/save", mapping_save)
+    app.router.add_post("/api/mapping/switch_localization", mapping_switch_localization)
+
+    app.router.add_post("/api/checklist/run", checklist_run)
+
+    app.router.add_post("/api/arm/gripper", arm_gripper)
+    app.router.add_post("/api/arm/pose", arm_pose)
+    app.router.add_post("/api/arm/jog", arm_jog)
+    app.router.add_post("/api/arm/stop", arm_stop)
+
+    app.router.add_post("/api/tasks/pick_place/start", pick_place_start)
+    app.router.add_post("/api/tasks/pick_place/stop", pick_place_stop)
+    app.router.add_post("/api/tasks/pick_place/skip", pick_place_skip)
+    app.router.add_post("/api/tasks/pick_place/retry", pick_place_retry)
+    app.router.add_post("/api/tasks/pick_place/abort", pick_place_abort)
+
+    app.router.add_post("/api/recording/start", recording_start)
+    app.router.add_post("/api/recording/stop", recording_stop)
+    app.router.add_get("/api/recording/list", recording_list)
+    app.router.add_post("/api/recording/replay_hint", recording_replay_hint)
+
+    app.router.add_post("/api/demo/run", demo_run)
+    app.router.add_post("/api/demo/stop", demo_stop)
+
+    app.router.add_post("/api/stack/start", stack_start)
+    app.router.add_post("/api/stack/stop", stack_stop)
+
+    app.router.add_get("/ws", ws_handler)
+
+    app.router.add_get("/layouts/{path:.*}", layout_files)
+    app.router.add_get("/", index)
+    app.router.add_get("/{path:.*}", static_files)
+
+    return app
+
+
+async def run_web_server(node: RobotConsoleApiNode) -> None:
+    app = create_app(node)
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    host = node.config.get("server", {}).get("host", "0.0.0.0")
+    port = int(node.config.get("server", {}).get("http_port", 8080))
+    site = web.TCPSite(runner, host=host, port=port)
+    await site.start()
+
+    loop = asyncio.get_running_loop()
+    node.attach_event_loop(loop)
+
+    stop_event = asyncio.Event()
+
+    def _signal_stop() -> None:
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_stop)
+        except NotImplementedError:
+            pass
+
+    node.get_logger().info(f"Robot Console listening on http://{host}:{port}")
+
+    try:
+        while not stop_event.is_set():
+            await asyncio.sleep(0.5)
+    finally:
+        await runner.cleanup()
+
+
+def main(args: Optional[list[str]] = None) -> None:
+    rclpy.init(args=args)
+    node = RobotConsoleApiNode()
+
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+
+    try:
+        asyncio.run(run_web_server(node))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.shutdown()
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
+        spin_thread.join(timeout=2.0)
+
+
+if __name__ == "__main__":
+    main()
