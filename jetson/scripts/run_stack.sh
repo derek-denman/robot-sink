@@ -7,6 +7,26 @@ log() {
   echo "[${SCRIPT_NAME}] $*"
 }
 
+safe_source() {
+  local file="$1"
+  local had_u=0
+
+  case $- in
+    *u*) had_u=1 ;;
+  esac
+
+  set +u
+  # shellcheck disable=SC1090
+  source "${file}"
+  local rc=$?
+
+  if [[ ${had_u} -eq 1 ]]; then
+    set -u
+  fi
+
+  return ${rc}
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${JETSON_LOG_DIR:-${REPO_ROOT}/jetson/logs}"
@@ -22,16 +42,14 @@ if [[ "${SETUP_BB_NETWORK:-1}" == "1" ]]; then
 fi
 
 if [[ -f "/opt/ros/${ROS_DISTRO_NAME}/setup.bash" ]]; then
-  # shellcheck disable=SC1091
-  source "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+  safe_source "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
   log "Sourced /opt/ros/${ROS_DISTRO_NAME}/setup.bash"
 else
   log "ROS setup file not found: /opt/ros/${ROS_DISTRO_NAME}/setup.bash"
 fi
 
 if [[ -f "${REPO_ROOT}/ros_ws/install/setup.bash" ]]; then
-  # shellcheck disable=SC1091
-  source "${REPO_ROOT}/ros_ws/install/setup.bash"
+  safe_source "${REPO_ROOT}/ros_ws/install/setup.bash"
   log "Sourced ros_ws install/setup.bash"
 fi
 

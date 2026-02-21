@@ -7,6 +7,26 @@ log() {
   echo "[${SCRIPT_NAME}] $*"
 }
 
+safe_source() {
+  local file="$1"
+  local had_u=0
+
+  case $- in
+    *u*) had_u=1 ;;
+  esac
+
+  set +u
+  # shellcheck disable=SC1090
+  source "${file}"
+  local rc=$?
+
+  if [[ ${had_u} -eq 1 ]]; then
+    set -u
+  fi
+
+  return ${rc}
+}
+
 run_sudo() {
   if [[ ${EUID} -eq 0 ]]; then
     "$@"
@@ -178,8 +198,7 @@ fi
 ROBOT_ROOT="${ROBOT_ROOT:-${TARGET_HOME}/robot-sink}"
 if [[ -d "${ROBOT_ROOT}/ros_ws" && -f /opt/ros/humble/setup.bash && -n "${COLCON_BIN}" ]]; then
   log "Building ros_ws (if packages are present)."
-  # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
+  safe_source /opt/ros/humble/setup.bash
   (cd "${ROBOT_ROOT}/ros_ws" && "${COLCON_BIN}" build --symlink-install)
 fi
 
