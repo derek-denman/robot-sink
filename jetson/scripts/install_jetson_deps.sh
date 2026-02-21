@@ -15,8 +15,20 @@ run_sudo() {
   fi
 }
 
+run_as_target_user() {
+  if [[ ${EUID} -eq 0 ]]; then
+    sudo -u "${TARGET_USER}" -H "$@"
+  else
+    "$@"
+  fi
+}
+
 has_internet() {
   ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1
+}
+
+pkg_available() {
+  apt-cache show "$1" >/dev/null 2>&1
 }
 
 TARGET_USER="${ROBOT_USER:-${SUDO_USER:-${USER:-ubuntu}}}"
@@ -43,19 +55,25 @@ if ! has_internet; then
 fi
 
 run_sudo apt-get update
+
+# Install enough tooling to manage repositories on fresh images.
 run_sudo apt-get install -y \
   software-properties-common \
   curl \
   gnupg \
-  lsb-release \
+  lsb-release
+
+if command -v add-apt-repository >/dev/null 2>&1; then
+  run_sudo add-apt-repository -y universe >/dev/null || true
+fi
+
+run_sudo apt-get update
+run_sudo apt-get install -y \
   build-essential \
   cmake \
   git \
   python3-pip \
   python3-venv \
-  python3-colcon-common-extensions \
-  python3-rosdep \
-  python3-vcstool \
   python3-serial \
   net-tools \
   iproute2 \
@@ -81,40 +99,88 @@ if [[ "${CODENAME}" == "jammy" ]]; then
   run_sudo apt-get update
   run_sudo apt-get install -y \
     ros-humble-ros-base \
-    ros-humble-rplidar-ros \
-    ros-dev-tools
+    ros-humble-rplidar-ros
+
+  if pkg_available ros-dev-tools; then
+    run_sudo apt-get install -y ros-dev-tools
+  fi
 
   if ! pip3 show depthai >/dev/null 2>&1; then
-    pip3 install --user depthai
+    run_as_target_user pip3 install --user depthai
   fi
 else
   log "ROS 2 Humble binary packages are supported on Ubuntu 22.04 (jammy)."
   log "This system is '${CODENAME}'. Install Humble from source or use Docker on this image."
 fi
 
-if [[ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]]; then
-  run_sudo rosdep init
+MISSING_TOOLS=()
+
+if pkg_available python3-colcon-common-extensions; then
+  run_sudo apt-get install -y python3-colcon-common-extensions
+else
+  MISSING_TOOLS+=(colcon-common-extensions)
 fi
-rosdep update
+
+if pkg_available python3-vcstool; then
+  run_sudo apt-get install -y python3-vcstool
+else
+  MISSING_TOOLS+=(vcstool)
+fi
+
+if pkg_available python3-rosdep; then
+  run_sudo apt-get install -y python3-rosdep
+elif pkg_available python3-rosdep2; then
+  run_sudo apt-get install -y python3-rosdep2
+else
+  MISSING_TOOLS+=(rosdep)
+fi
+
+if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
+  log "Falling back to pip for missing tools: ${MISSING_TOOLS[*]}"
+  run_as_target_user pip3 install --user "${MISSING_TOOLS[@]}"
+fi
+
+ROSDEP_BIN="$(command -v rosdep || true)"
+if [[ -z "${ROSDEP_BIN}" && -x "${TARGET_HOME}/.local/bin/rosdep" ]]; then
+  ROSDEP_BIN="${TARGET_HOME}/.local/bin/rosdep"
+fi
+
+if [[ -n "${ROSDEP_BIN}" ]]; then
+  if [[ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]]; then
+    run_sudo "${ROSDEP_BIN}" init
+  fi
+  run_as_target_user "${ROSDEP_BIN}" update
+else
+  log "rosdep command not found after installation; skipping rosdep init/update."
+fi
 
 BASHRC="${TARGET_HOME}/.bashrc"
 ROS_SETUP_LINE="source /opt/ros/humble/setup.bash"
 WS_SETUP_LINE="source \$HOME/robot-sink/ros_ws/install/setup.bash"
 
+if [[ ! -f "${BASHRC}" ]]; then
+  run_as_target_user touch "${BASHRC}"
+fi
+
 if [[ -f /opt/ros/humble/setup.bash ]] && ! grep -Fq "${ROS_SETUP_LINE}" "${BASHRC}"; then
-  echo "${ROS_SETUP_LINE}" >>"${BASHRC}"
+  echo "${ROS_SETUP_LINE}" | run_as_target_user tee -a "${BASHRC}" >/dev/null
 fi
 
 if ! grep -Fq "${WS_SETUP_LINE}" "${BASHRC}"; then
-  echo "${WS_SETUP_LINE}" >>"${BASHRC}"
+  echo "${WS_SETUP_LINE}" | run_as_target_user tee -a "${BASHRC}" >/dev/null
+fi
+
+COLCON_BIN="$(command -v colcon || true)"
+if [[ -z "${COLCON_BIN}" && -x "${TARGET_HOME}/.local/bin/colcon" ]]; then
+  COLCON_BIN="${TARGET_HOME}/.local/bin/colcon"
 fi
 
 ROBOT_ROOT="${ROBOT_ROOT:-${TARGET_HOME}/robot-sink}"
-if [[ -d "${ROBOT_ROOT}/ros_ws" && -f /opt/ros/humble/setup.bash ]]; then
+if [[ -d "${ROBOT_ROOT}/ros_ws" && -f /opt/ros/humble/setup.bash && -n "${COLCON_BIN}" ]]; then
   log "Building ros_ws (if packages are present)."
   # shellcheck disable=SC1091
   source /opt/ros/humble/setup.bash
-  (cd "${ROBOT_ROOT}/ros_ws" && colcon build --symlink-install)
+  (cd "${ROBOT_ROOT}/ros_ws" && "${COLCON_BIN}" build --symlink-install)
 fi
 
 log "Dependency install complete."
