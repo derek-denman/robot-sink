@@ -83,7 +83,17 @@ cd ~/robot-sink
 ./jetson/scripts/run_stack.sh
 ```
 
-### 5) Optional boot-time service
+### 5) Control UI (Robot Console)
+
+Robot Console is hosted on the Jetson and served by the `robot_console` ROS backend.
+
+- Open: `http://JETSON_IP:8080`
+- Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
+- Foxglove bridge: `ws://JETSON_IP:8765`
+
+See `jetson/console/README.md` for controls, configuration, and troubleshooting.
+
+### 6) Optional boot-time service
 
 ```bash
 ./jetson/scripts/enable_services.sh --user ubuntu --now
@@ -130,6 +140,7 @@ Top-level docs pointer:
 │   └── scripts/
 ├── jetson/
 │   ├── README.md
+│   ├── console/
 │   ├── docs/
 │   ├── scripts/
 │   ├── systemd/
