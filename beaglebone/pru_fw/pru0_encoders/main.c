@@ -21,6 +21,14 @@
 #define VIRTIO_CONFIG_S_DRIVER_OK 4
 #endif
 
+#if !defined(BBB_RPMSG_CHANNEL_WITH_DESC) && !defined(BBB_RPMSG_CHANNEL_NO_DESC)
+#if defined(__TI_COMPILER_VERSION__)
+#define BBB_RPMSG_CHANNEL_NO_DESC 1
+#else
+#define BBB_RPMSG_CHANNEL_WITH_DESC 1
+#endif
+#endif
+
 volatile register uint32_t __R31;
 
 #define CHAN_NAME "rpmsg-pru"
@@ -93,6 +101,7 @@ static struct pru_rpmsg_transport g_transport;
 static uint16_t g_last_src;
 static uint16_t g_last_dst;
 static uint8_t g_has_host_peer;
+typedef uint16_t rpmsg_len_t;
 
 static int32_t g_counts[4];
 static int32_t g_velocity_tps[4];
@@ -112,14 +121,17 @@ static uint16_t g_sequence;
 
 static int16_t rpmsg_create_channel(struct pru_rpmsg_transport *transport)
 {
-#ifdef BBB_RPMSG_CHANNEL_NO_DESC
-    return pru_rpmsg_channel(RPMSG_NS_CREATE, transport, CHAN_NAME, CHAN_PORT);
+#if defined(BBB_RPMSG_CHANNEL_WITH_DESC)
+    return pru_rpmsg_channel(RPMSG_NS_CREATE,
+                             transport,
+                             (char *)CHAN_NAME,
+                             (char *)CHAN_DESC,
+                             (int32_t)CHAN_PORT);
 #else
     return pru_rpmsg_channel(RPMSG_NS_CREATE,
                              transport,
-                             CHAN_NAME,
-                             CHAN_DESC,
-                             CHAN_PORT);
+                             (char *)CHAN_NAME,
+                             (int32_t)CHAN_PORT);
 #endif
 }
 
@@ -161,7 +173,7 @@ static void send_message(const bbb_msg_t *msg)
                          g_last_dst,
                          g_last_src,
                          (void *)msg,
-                         sizeof(*msg));
+                         (uint16_t)sizeof(*msg));
 }
 
 static void send_ack(uint16_t request_sequence, int16_t status, uint16_t detail)
@@ -317,7 +329,7 @@ static void process_rpmsg(void)
 {
     uint16_t src;
     uint16_t dst;
-    uint16_t len;
+    rpmsg_len_t len = 0u;
     uint8_t payload[sizeof(bbb_msg_t)];
 
     while (pru_rpmsg_receive(&g_transport,
@@ -327,7 +339,7 @@ static void process_rpmsg(void)
                              &len) == PRU_RPMSG_SUCCESS) {
         bbb_msg_t msg;
 
-        if ((uint16_t)len < sizeof(msg)) {
+        if (len < (rpmsg_len_t)sizeof(msg)) {
             continue;
         }
 
