@@ -13,6 +13,7 @@ PLAN_KERNEL=""
 PLAN_OVERLAY=""
 PLAN_NEEDS_UNAME_CHANGE=0
 PLAN_NEEDS_OVERLAY_CHANGE=0
+KICK_OOPS_DETECTED=0
 
 usage() {
   cat <<'USAGE'
@@ -126,6 +127,17 @@ kernel_has_rproc_overlay() {
   pick_best_rproc_overlay "${kernel}" >/dev/null 2>&1
 }
 
+detect_kick_oops_signature() {
+  local hints
+
+  hints="$(dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg|oops|segfault|bug' | tail -n 160 || true)"
+  if printf '%s\n' "${hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|oops: [0-9]|kick method not defined|boot failed: -22'; then
+    return 0
+  fi
+
+  return 1
+}
+
 latest_backup() {
   ls -1t ${BACKUP_GLOB} 2>/dev/null | head -n 1 || true
 }
@@ -208,6 +220,11 @@ build_plan() {
   selected_kernel="$(get_uenv_key uname_r)"
   selected_overlay="$(get_uenv_key uboot_overlay_pru)"
   effective_kernel="${selected_kernel:-${running}}"
+  KICK_OOPS_DETECTED=0
+
+  if detect_kick_oops_signature; then
+    KICK_OOPS_DETECTED=1
+  fi
 
   PLAN_REASON="No change required."
   PLAN_KERNEL="${effective_kernel}"
@@ -241,6 +258,17 @@ build_plan() {
     return
   fi
 
+  if [[ -z "${TARGET_KERNEL}" ]] && [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+    while IFS= read -r candidate_kernel; do
+      [[ -n "${candidate_kernel}" ]] || continue
+      [[ "${candidate_kernel}" == "${effective_kernel}" ]] && continue
+      if kernel_has_rproc_overlay "${candidate_kernel}"; then
+        chosen_kernel="${candidate_kernel}"
+        break
+      fi
+    done < <(list_installed_kernels)
+  fi
+
   if [[ -n "${TARGET_OVERLAY}" ]]; then
     validate_overlay_for_kernel "${chosen_kernel}" "${TARGET_OVERLAY}" || \
       die "--overlay ${TARGET_OVERLAY} not found under overlays for kernel ${chosen_kernel}"
@@ -259,7 +287,11 @@ build_plan() {
 
   if [[ "${PLAN_KERNEL}" != "${effective_kernel}" ]]; then
     PLAN_NEEDS_UNAME_CHANGE=1
-    PLAN_REASON="Switch to installed kernel with PRU RPROC overlay support for RPMsg stability."
+    if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+      PLAN_REASON="Current kernel shows RPMsg kick-path Oops; switch to alternate installed kernel with PRU RPROC overlay."
+    else
+      PLAN_REASON="Switch to installed kernel with PRU RPROC overlay support for RPMsg stability."
+    fi
   fi
 
   if [[ -n "${PLAN_OVERLAY}" && "${PLAN_OVERLAY}" != "${selected_overlay}" ]]; then
@@ -278,6 +310,10 @@ build_plan() {
 
 show_plan() {
   log "plan: ${PLAN_REASON}"
+
+  if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
+    log "observed kick-path failure signature in recent dmesg."
+  fi
 
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 1 ]]; then
     log "planned uname_r=${PLAN_KERNEL}"
