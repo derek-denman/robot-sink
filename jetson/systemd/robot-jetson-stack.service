@@ -1,0 +1,22 @@
+[Unit]
+Description=Robot Jetson Bring-Up Runtime Stack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__ROBOT_USER__
+WorkingDirectory=__ROBOT_ROOT__
+Environment=ROBOT_ROOT=__ROBOT_ROOT__
+Environment=ROS_DISTRO=humble
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__ROBOT_ROOT__/jetson/scripts/run_stack.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
