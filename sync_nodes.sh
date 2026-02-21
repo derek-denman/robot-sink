@@ -19,7 +19,7 @@ Options:
   --target TARGET            one of: both | jetson | beaglebone (default: both)
 
   --jetson TARGET            Jetson destination in user@host:/path form
-                             (default: ubuntu@192.168.7.1:/home/ubuntu/robot-sink)
+                             (default: jetson@10.0.0.178:/home/jetson/robot-sink)
 
   --bb-host HOST             BeagleBone host/IP (default: 192.168.7.2)
   --bb-user USER             BeagleBone SSH user (default: debian)
@@ -40,7 +40,7 @@ USAGE
 }
 
 TARGET="both"
-JETSON_TARGET="ubuntu@192.168.7.1:/home/ubuntu/robot-sink"
+JETSON_TARGET="jetson@10.0.0.178:/home/jetson/robot-sink"
 BB_HOST="192.168.7.2"
 BB_USER="debian"
 BB_DEST="~/robot-sink"
