@@ -162,6 +162,7 @@ sync_jetson() {
     ros_ws
     docs
     README.md
+    sync_bb.sh
   )
   local -a optional_paths=(
     beaglebone/host_daemon/config.yaml
