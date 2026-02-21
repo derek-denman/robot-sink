@@ -82,8 +82,20 @@ collect_filtered_dmesg() {
 }
 
 print_rpmsg_nodes() {
+  local found=0
+
   echo "[deploy_firmware] rpmsg device nodes:"
-  ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || echo "  none"
+  if compgen -G '/dev/rpmsg*' >/dev/null; then
+    ls -l /dev/rpmsg*
+    found=1
+  fi
+  if compgen -G '/dev/ttyRPMSG*' >/dev/null; then
+    ls -l /dev/ttyRPMSG*
+    found=1
+  fi
+  if [[ ${found} -eq 0 ]]; then
+    echo "  none"
+  fi
 }
 
 print_rpmsg_boot_failure_guidance() {
