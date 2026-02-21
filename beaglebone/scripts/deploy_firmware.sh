@@ -10,20 +10,15 @@ PRU1_FW_SRC="${REPO_ROOT}/beaglebone/pru_fw/pru1_sabertooth/am335x-pru1-fw"
 PRU0_FW_DST="/lib/firmware/am335x-pru0-fw"
 PRU1_FW_DST="/lib/firmware/am335x-pru1-fw"
 
+DEFAULT_PRU0_RP="/sys/class/remoteproc/remoteproc1"
+DEFAULT_PRU1_RP="/sys/class/remoteproc/remoteproc2"
+
+FIXUP_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rpmsg_fixup.sh"
+
 if [[ ! -f "${PRU0_FW_SRC}" || ! -f "${PRU1_FW_SRC}" ]]; then
-  echo "Firmware binaries missing. Run beaglebone/scripts/build_pru.sh first." >&2
+  echo "[deploy_firmware] ERROR: firmware binaries are missing." >&2
+  echo "[deploy_firmware] run ./beaglebone/scripts/build_pru.sh first." >&2
   exit 1
-fi
-
-if [[ -f /boot/uEnv.txt ]] && grep -Eq '^[[:space:]]*uboot_overlay_pru=.*UIO' /boot/uEnv.txt; then
-  echo "[deploy_firmware] WARNING: /boot/uEnv.txt currently selects a PRU UIO overlay."
-  echo "[deploy_firmware] RPMsg firmware requires a PRU RPROC overlay/kernel combo."
-fi
-
-if command -v file >/dev/null 2>&1; then
-  echo "[deploy_firmware] firmware file types:"
-  file "${PRU0_FW_SRC}" || true
-  file "${PRU1_FW_SRC}" || true
 fi
 
 sysfs_read() {
@@ -35,9 +30,21 @@ sysfs_read() {
   fi
 }
 
+uenv_get() {
+  local key="$1"
+  local value=""
+
+  if [[ -r /boot/uEnv.txt ]]; then
+    value="$(grep -E "^[[:space:]]*${key}=" /boot/uEnv.txt | tail -n 1 | cut -d= -f2- || true)"
+  fi
+
+  printf '%s' "${value}"
+}
+
 print_remoteproc_table() {
   local rp
-  echo "[deploy_firmware] remoteproc inventory:"
+
+  echo "[deploy_firmware] remoteproc state table:"
   for rp in /sys/class/remoteproc/remoteproc*; do
     [[ -d "${rp}" ]] || continue
     printf "  %s name=%s firmware=%s state=%s\n" \
@@ -48,77 +55,105 @@ print_remoteproc_table() {
   done
 }
 
+print_kernel_overlay_context() {
+  local running_kernel selected_kernel selected_overlay
+
+  running_kernel="$(uname -r)"
+  selected_kernel="$(uenv_get uname_r)"
+  selected_overlay="$(uenv_get uboot_overlay_pru)"
+
+  echo "[deploy_firmware] kernel/overlay context:"
+  echo "  uname -r=${running_kernel}"
+  if [[ -r /boot/uEnv.txt ]]; then
+    echo "  /boot/uEnv.txt uname_r=${selected_kernel:-<unset>}"
+    echo "  /boot/uEnv.txt uboot_overlay_pru=${selected_overlay:-<unset>}"
+  else
+    echo "  /boot/uEnv.txt not readable"
+  fi
+}
+
+collect_filtered_dmesg() {
+  if command -v dmesg >/dev/null 2>&1; then
+    dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg' | tail -n 50 || true
+  fi
+}
+
+print_rpmsg_boot_failure_guidance() {
+  echo "[deploy_firmware] detected PRU remoteproc RPMsg boot failure (.kick method not defined / Boot failed: -22)." >&2
+  echo "[deploy_firmware] remediation options:" >&2
+  if [[ -x "${FIXUP_SCRIPT}" ]]; then
+    echo "  1) Inspect and plan fixups:" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_fixup.sh --plan" >&2
+    echo "  2) Apply recommended uEnv/kernel overlay changes (with backup):" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_fixup.sh --apply" >&2
+    echo "  3) Reboot and redeploy:" >&2
+    echo "     sudo reboot" >&2
+    echo "     ./beaglebone/scripts/deploy_firmware.sh" >&2
+  else
+    echo "  - add/run beaglebone/scripts/pru_rpmsg_fixup.sh --plan" >&2
+    echo "  - switch to a kernel + PRU RPROC overlay pair known to support RPMsg kick" >&2
+    echo "  - reboot, then rerun deploy_firmware.sh" >&2
+  fi
+}
+
+print_failure_diagnostics() {
+  local dmesg_hints="$1"
+
+  print_remoteproc_table >&2
+  print_kernel_overlay_context >&2
+
+  if [[ -n "${dmesg_hints}" ]]; then
+    echo "[deploy_firmware] recent kernel log (remoteproc/rproc-virtio/pru/rpmsg):" >&2
+    printf '%s\n' "${dmesg_hints}" >&2
+  else
+    echo "[deploy_firmware] no filtered dmesg lines available." >&2
+  fi
+
+  if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'kick method not defined|boot failed: -22|failed to probe subdevices.*-22'; then
+    print_rpmsg_boot_failure_guidance
+  fi
+}
+
 discover_pru_remoteprocs() {
   local rp
   local name
   local fw
-  local -a pru_candidates=()
+  local -a candidates=()
 
   PRU0_RP=""
   PRU1_RP=""
 
-  # First pass: explicit pru0/pru1 in remoteproc name or firmware.
+  if [[ -d "${DEFAULT_PRU0_RP}" && -d "${DEFAULT_PRU1_RP}" ]]; then
+    PRU0_RP="${DEFAULT_PRU0_RP}"
+    PRU1_RP="${DEFAULT_PRU1_RP}"
+    return 0
+  fi
+
+  echo "[deploy_firmware] WARNING: remoteproc1/remoteproc2 not both present; using name-based fallback." >&2
+
   for rp in /sys/class/remoteproc/remoteproc*; do
     [[ -d "${rp}" ]] || continue
     name="$(sysfs_read "${rp}/name" | tr '[:upper:]' '[:lower:]')"
     fw="$(sysfs_read "${rp}/firmware" | tr '[:upper:]' '[:lower:]')"
 
-    if [[ -z "${PRU0_RP}" ]] && [[ "${name}" =~ pru0|pru-0|pru_0|\.0|/0|_0$ ]]; then
-      PRU0_RP="${rp}"
-      continue
-    fi
-    if [[ -z "${PRU1_RP}" ]] && [[ "${name}" =~ pru1|pru-1|pru_1|\.1|/1|_1$ ]]; then
-      PRU1_RP="${rp}"
-      continue
-    fi
-    if [[ -z "${PRU0_RP}" ]] && [[ "${fw}" == *"am335x-pru0-fw"* ]]; then
-      PRU0_RP="${rp}"
-      continue
-    fi
-    if [[ -z "${PRU1_RP}" ]] && [[ "${fw}" == *"am335x-pru1-fw"* ]]; then
-      PRU1_RP="${rp}"
-      continue
+    if [[ "${name}" == *"pru"* || "${fw}" == *"am335x-pru"* ]]; then
+      candidates+=("${rp}")
     fi
   done
 
-  # Second pass: any PRU-like remoteproc names.
-  for rp in /sys/class/remoteproc/remoteproc*; do
-    [[ -d "${rp}" ]] || continue
-    name="$(sysfs_read "${rp}/name" | tr '[:upper:]' '[:lower:]')"
-    if [[ "${name}" == *"pru"* ]]; then
-      pru_candidates+=("${rp}")
-    fi
-  done
-
-  if [[ -z "${PRU0_RP}" ]] && [[ ${#pru_candidates[@]} -ge 1 ]]; then
-    PRU0_RP="${pru_candidates[0]}"
-  fi
-  if [[ -z "${PRU1_RP}" ]] && [[ ${#pru_candidates[@]} -ge 2 ]]; then
-    if [[ "${pru_candidates[0]}" == "${PRU0_RP}" ]]; then
-      PRU1_RP="${pru_candidates[1]}"
-    else
-      PRU1_RP="${pru_candidates[0]}"
-    fi
+  if [[ ${#candidates[@]} -ge 2 ]]; then
+    PRU0_RP="${candidates[0]}"
+    PRU1_RP="${candidates[1]}"
+    return 0
   fi
 
-  if [[ -z "${PRU0_RP}" || -z "${PRU1_RP}" ]]; then
-    echo "[deploy_firmware] ERROR: could not detect both PRU remoteproc devices." >&2
-    print_remoteproc_table >&2
-    return 1
-  fi
-
-  if [[ "${PRU0_RP}" == "${PRU1_RP}" ]]; then
-    echo "[deploy_firmware] ERROR: PRU0 and PRU1 resolved to the same remoteproc (${PRU0_RP})." >&2
-    print_remoteproc_table >&2
-    return 1
-  fi
-
-  return 0
+  return 1
 }
 
 stop_remoteproc_if_running() {
   local rp="$1"
   local state
+
   state="$(sysfs_read "${rp}/state")"
   if [[ "${state}" == "running" ]]; then
     echo "[deploy_firmware] stopping ${rp}"
@@ -131,14 +166,18 @@ stop_remoteproc_if_running() {
 set_remoteproc_firmware() {
   local rp="$1"
   local fw_basename="$2"
-  if [[ -w "${rp}/firmware" || -e "${rp}/firmware" ]]; then
-    echo "${fw_basename}" | sudo tee "${rp}/firmware" >/dev/null || true
+
+  if [[ ! -e "${rp}/firmware" ]]; then
+    return
   fi
+
+  echo "${fw_basename}" | sudo tee "${rp}/firmware" >/dev/null || true
 }
 
 start_remoteproc() {
   local rp="$1"
   local state
+
   state="$(sysfs_read "${rp}/state")"
   if [[ "${state}" == "running" ]]; then
     echo "[deploy_firmware] ${rp} already running"
@@ -146,32 +185,38 @@ start_remoteproc() {
   fi
 
   if [[ "${state}" == "attached" ]]; then
-    # Some kernels use "attached" for externally loaded firmware.
     echo "[deploy_firmware] detaching ${rp} (state=attached)"
     echo detach | sudo tee "${rp}/state" >/dev/null || true
   fi
 
   echo "[deploy_firmware] starting ${rp}"
   if ! echo start | sudo tee "${rp}/state" >/dev/null; then
-    echo "[deploy_firmware] ERROR: failed to start ${rp}." >&2
-    print_remoteproc_table >&2
-    if command -v dmesg >/dev/null 2>&1; then
-      local hints
-      hints="$(dmesg -T | grep -Ei 'remoteproc|pru|firmware|resource table|elf|kick method not defined' | tail -n 80 || true)"
-      echo "[deploy_firmware] recent kernel hints:" >&2
-      printf '%s\n' "${hints}" >&2
-      if printf '%s\n' "${hints}" | grep -q "kick method not defined"; then
-        echo "[deploy_firmware] detected kernel/DT limitation: PRU remoteproc has no RPMsg kick support." >&2
-        echo "[deploy_firmware] use a kernel+DT that supports PRU RPMsg, or disable RPMsg vdev for diagnostics." >&2
-      fi
-    fi
     return 1
   fi
+
+  state="$(sysfs_read "${rp}/state")"
+  [[ "${state}" == "running" ]]
 }
 
-discover_pru_remoteprocs
-echo "[deploy_firmware] PRU0=${PRU0_RP}"
-echo "[deploy_firmware] PRU1=${PRU1_RP}"
+if [[ -f /boot/uEnv.txt ]] && grep -Eq '^[[:space:]]*uboot_overlay_pru=.*UIO' /boot/uEnv.txt; then
+  echo "[deploy_firmware] WARNING: /boot/uEnv.txt selects a PRU UIO overlay." >&2
+  echo "[deploy_firmware] RPMsg firmware expects a PRU RPROC overlay/kernel pair." >&2
+fi
+
+if command -v file >/dev/null 2>&1; then
+  echo "[deploy_firmware] firmware file types:"
+  file "${PRU0_FW_SRC}" || true
+  file "${PRU1_FW_SRC}" || true
+fi
+
+if ! discover_pru_remoteprocs; then
+  echo "[deploy_firmware] ERROR: could not resolve PRU remoteproc devices." >&2
+  print_failure_diagnostics "$(collect_filtered_dmesg)"
+  exit 1
+fi
+
+echo "[deploy_firmware] PRU0 remoteproc=${PRU0_RP}"
+echo "[deploy_firmware] PRU1 remoteproc=${PRU1_RP}"
 
 stop_remoteproc_if_running "${PRU0_RP}"
 stop_remoteproc_if_running "${PRU1_RP}"
@@ -182,9 +227,15 @@ sudo install -m 0644 "${PRU1_FW_SRC}" "${PRU1_FW_DST}"
 set_remoteproc_firmware "${PRU0_RP}" "am335x-pru0-fw"
 set_remoteproc_firmware "${PRU1_RP}" "am335x-pru1-fw"
 
-start_remoteproc "${PRU0_RP}"
-start_remoteproc "${PRU1_RP}"
+start_failed=0
+start_remoteproc "${PRU0_RP}" || start_failed=1
+start_remoteproc "${PRU1_RP}" || start_failed=1
+
+if [[ ${start_failed} -ne 0 ]]; then
+  echo "[deploy_firmware] ERROR: failed to start one or more PRU remoteprocs." >&2
+  print_failure_diagnostics "$(collect_filtered_dmesg)"
+  exit 1
+fi
 
 print_remoteproc_table
-
-echo "Deployed PRU firmware to ${PRU0_FW_DST} and ${PRU1_FW_DST}"
+echo "[deploy_firmware] deployed firmware to ${PRU0_FW_DST} and ${PRU1_FW_DST}"
