@@ -38,6 +38,28 @@ Expected:
 - Symlinks exist and point to active ttyUSB/ttyACM devices
 - Group ownership includes `dialout`
 
+## If `/dev/ttyROARM` Is Missing
+
+1. Check all serial candidates:
+
+```bash
+ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+```
+
+2. Inspect IDs for each candidate:
+
+```bash
+udevadm info --query=property --name=/dev/ttyUSB0 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_MODEL'
+udevadm info --query=property --name=/dev/ttyUSB1 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_MODEL'
+udevadm info --query=property --name=/dev/ttyACM0 | grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_MODEL'
+```
+
+3. Add or refine the RoArm rule in `jetson/udev/99-robot-devices.rules` using that vendor/product (and serial if needed), then reload:
+
+```bash
+./jetson/scripts/setup_udev_rules.sh
+```
+
 ## If Both Devices Use Same USB-UART Chipset
 
 Refine the udev rule with serial matching:

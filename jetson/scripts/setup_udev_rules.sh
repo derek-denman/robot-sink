@@ -15,6 +15,17 @@ run_sudo() {
   fi
 }
 
+show_serial_candidates() {
+  local dev
+  shopt -s nullglob
+  for dev in /dev/ttyUSB* /dev/ttyACM*; do
+    log "candidate: ${dev}"
+    udevadm info --query=property --name="${dev}" 2>/dev/null | \
+      grep -E '^(ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_MODEL)=' || true
+  done
+  shopt -u nullglob
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RULES_SRC="${REPO_ROOT}/jetson/udev/99-robot-devices.rules"
@@ -36,6 +47,24 @@ fi
 log "Reloading udev rules"
 run_sudo udevadm control --reload-rules
 run_sudo udevadm trigger
+run_sudo udevadm settle
 
-log "Done. Replug USB serial devices and verify:"
-log "  ls -l /dev/ttyRPLIDAR /dev/ttyROARM"
+if [[ -L /dev/ttyRPLIDAR ]]; then
+  log "Found /dev/ttyRPLIDAR -> $(readlink /dev/ttyRPLIDAR)"
+else
+  log "Missing /dev/ttyRPLIDAR"
+fi
+
+if [[ -L /dev/ttyROARM ]]; then
+  log "Found /dev/ttyROARM -> $(readlink /dev/ttyROARM)"
+else
+  log "Missing /dev/ttyROARM"
+fi
+
+if [[ ! -L /dev/ttyRPLIDAR || ! -L /dev/ttyROARM ]]; then
+  log "Available USB serial candidates:"
+  show_serial_candidates
+  log "Use the ID_VENDOR_ID/ID_MODEL_ID values above to refine jetson/udev/99-robot-devices.rules."
+fi
+
+log "Done."
