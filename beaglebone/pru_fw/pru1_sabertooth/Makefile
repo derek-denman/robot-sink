@@ -6,6 +6,7 @@ PRU_LNKPRU ?= lnkpru
 PRU_CMD_FILE ?= $(PRU_SSP)/include/am335x-pru.cmd
 TOOLCHAIN ?= gcc
 PRU_TI_CGT_LIBDIR ?=
+PRU_TI_CGT_INCLUDEDIR ?=
 PRU_TI_RPMSG_LIB ?=
 PRU_TI_RPMSG_SRC ?=
 PRU_TI_VIRTQUEUE_SRC ?=
@@ -17,6 +18,7 @@ CFLAGS_TI := --c99 --endian=little --hardware_mac=on \
 	--silicon_version=3 --abi=eabi \
 	--include_path=$(PRU_SSP)/include \
 	--include_path=$(PRU_SSP)/include/am335x \
+	$(if $(strip $(PRU_TI_CGT_INCLUDEDIR)),--include_path=$(PRU_TI_CGT_INCLUDEDIR),) \
 	--define=BBB_RPMSG_CHANNEL_NO_DESC=1 \
 	--include_path=../common
 

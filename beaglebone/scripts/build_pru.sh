@@ -178,6 +178,37 @@ find_ti_cgt_libdir() {
   return 1
 }
 
+find_ti_cgt_includedir() {
+  local clpru_bin="$1"
+  local candidates=()
+
+  if [[ -n "${PRU_TI_CGT_INCLUDEDIR:-}" ]]; then
+    candidates+=("${PRU_TI_CGT_INCLUDEDIR}")
+  fi
+
+  if [[ -n "${clpru_bin}" ]]; then
+    local clpru_dir
+    clpru_dir="$(cd "$(dirname "${clpru_bin}")" && pwd)"
+    candidates+=("${clpru_dir}/../include")
+  fi
+
+  candidates+=(
+    /usr/share/ti/cgt-pru/include
+    /usr/share/ti/ti-cgt-pru_2.3.3/include
+    /opt/ti/cgt-pru/include
+  )
+
+  local dir
+  for dir in "${candidates[@]}"; do
+    if [[ -f "${dir}/stddef.h" ]]; then
+      printf '%s\n' "${dir}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 find_pru_rpmsg_lib() {
   local ssp="$1"
   local candidates=()
@@ -292,6 +323,7 @@ PRU_LNKPRU_BIN="$(find_lnkpru || true)"
 PRU_SSP_DIR="$(find_pru_ssp || true)"
 PRU_CMD_FILE_PATH=""
 PRU_TI_CGT_LIBDIR_PATH=""
+PRU_TI_CGT_INCLUDEDIR_PATH=""
 PRU_TI_RPMSG_LIB_PATH=""
 PRU_TI_RPMSG_SRC_PATH=""
 PRU_TI_VIRTQUEUE_SRC_PATH=""
@@ -326,6 +358,7 @@ fi
 
 if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
   PRU_TI_CGT_LIBDIR_PATH="$(find_ti_cgt_libdir "${PRU_CLPRU_BIN}" || true)"
+  PRU_TI_CGT_INCLUDEDIR_PATH="$(find_ti_cgt_includedir "${PRU_CLPRU_BIN}" || true)"
   PRU_TI_RPMSG_LIB_PATH="$(find_pru_rpmsg_lib "${PRU_SSP_DIR}" || true)"
   # Prefer source pair so objects are rebuilt with matching ABI.
   PRU_TI_RPMSG_SRC_PATH="$(find_pru_rpmsg_src "${PRU_SSP_DIR}" || true)"
@@ -356,6 +389,11 @@ if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
   if [[ -n "${PRU_TI_CGT_LIBDIR_PATH}" ]]; then
     echo "[build_pru] using PRU_TI_CGT_LIBDIR=${PRU_TI_CGT_LIBDIR_PATH}"
   fi
+  if [[ -n "${PRU_TI_CGT_INCLUDEDIR_PATH}" ]]; then
+    echo "[build_pru] using PRU_TI_CGT_INCLUDEDIR=${PRU_TI_CGT_INCLUDEDIR_PATH}"
+  else
+    echo "[build_pru] WARNING: TI CGT include dir not auto-detected; set PRU_TI_CGT_INCLUDEDIR if build fails on stddef.h." >&2
+  fi
   if [[ -n "${PRU_TI_RPMSG_LIB_PATH}" ]]; then
     echo "[build_pru] using PRU_TI_RPMSG_LIB=${PRU_TI_RPMSG_LIB_PATH}"
   else
@@ -371,6 +409,7 @@ if [[ -n "${PRU_CLPRU_BIN}" && -n "${PRU_LNKPRU_BIN}" ]]; then
     PRU_SSP="${PRU_SSP_DIR}" \
     PRU_CMD_FILE="${PRU_CMD_FILE_PATH}" \
     PRU_TI_CGT_LIBDIR="${PRU_TI_CGT_LIBDIR_PATH}" \
+    PRU_TI_CGT_INCLUDEDIR="${PRU_TI_CGT_INCLUDEDIR_PATH}" \
     PRU_TI_RPMSG_LIB="${PRU_TI_RPMSG_LIB_PATH}" \
     PRU_TI_RPMSG_SRC="${PRU_TI_RPMSG_SRC_PATH}" \
     PRU_TI_VIRTQUEUE_SRC="${PRU_TI_VIRTQUEUE_SRC_PATH}"
