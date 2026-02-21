@@ -23,13 +23,21 @@ Back: [Agent Index](INDEX.md) | [Root Start Here](../../AGENTS.md)
   ```
   If needed, symlink expected command file name to match build expectations.
 
-## 3) PRU remoteproc RPMsg boot failure on `6.19.0-bone8`
-- Symptom: `deploy_firmware.sh` fails to start PRU firmware.
-- Diagnosis: `dmesg` shows `.kick method not defined` and boot failure `-22`.
-- Current status: unresolved in current baseline; do not treat as fixed.
-- Mitigation options:
-  - use a kernel/DT combo known to support PRU RPMsg kick, or
-  - run diagnostic firmware paths that avoid RPMsg vdev while isolating base I/O.
+## 3) PRU remoteproc RPMsg boot failure (`.kick method not defined`, `Boot failed: -22`)
+- Symptom: `deploy_firmware.sh` fails to start `remoteproc1/remoteproc2`.
+- Diagnosis: kernel logs show missing PRU virtio kick support for RPMsg firmware.
+- Status: scripted remediation path is now available.
+- Use:
+  ```bash
+  ./beaglebone/scripts/pru_rpmsg_fixup.sh --plan
+  ./beaglebone/scripts/pru_rpmsg_fixup.sh --apply
+  sudo reboot
+  ./beaglebone/scripts/deploy_firmware.sh
+  ```
+- Notes:
+  - `pru_rpmsg_fixup.sh` only selects kernels that exist in `/boot/vmlinuz-*`.
+  - Overlay names encode expected kernel series (for example, `...-4-19-TI-...`).
+  - Detailed guidance: `beaglebone/docs/troubleshooting.md` and `beaglebone/docs/bringup.md`.
 
 ## 4) `bb-usb-gadgets` unstable (`Device or resource busy` / missing IPv4)
 - Symptom: USB gadget networking is flaky or comes up without usable IPv4.

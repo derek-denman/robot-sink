@@ -1,51 +1,56 @@
 # Troubleshooting
 
-## 1) PRU Firmware Not Running
+## 1) PRU remoteproc fails: `.kick method not defined` / `Boot failed -22`
 
-Check remoteproc state:
+### Symptom
 
-```bash
-for rp in /sys/class/remoteproc/remoteproc*; do
-  echo "${rp}: $(cat ${rp}/name 2>/dev/null) state=$(cat ${rp}/state 2>/dev/null)"
-done
-```
-
-If `deploy_firmware.sh` reports `Invalid argument` on `state`, the script likely targeted the wrong remoteproc node for your kernel/device tree. Current script versions print a remoteproc inventory and auto-detect PRU nodes by name/firmware before start/stop.
-
-If stopped:
-
-```bash
-./beaglebone/scripts/deploy_firmware.sh
-```
-
-Then inspect kernel logs:
-
-```bash
-dmesg -T | grep -Ei "pru|remoteproc|rpmsg"
-```
-
-If `dmesg` shows:
+`./beaglebone/scripts/deploy_firmware.sh` fails to start one or both PRUs, and `dmesg` includes lines like:
 
 ```text
 rproc-virtio ... .kick method not defined for 4a334000.pru
-... failed to probe subdevices ... -22
+remoteproc ... failed to probe subdevices ... -22
+remoteproc ... Boot failed: -22
 ```
 
-then the running kernel/DT PRU remoteproc driver does not provide RPMsg virtio kick support. Firmware can be a valid ELF and still fail to start when it contains RPMsg vdev entries.
+### Cause
 
-Checks:
+The firmware can load as ELF, but the active kernel + device tree + PRU overlay combination does not provide RPMsg virtio kick support.
+
+### Diagnose
 
 ```bash
-uname -a
-grep -n 'uboot_overlay_pru' /boot/uEnv.txt || true
+for r in /sys/class/remoteproc/remoteproc1 /sys/class/remoteproc/remoteproc2; do echo "== $r =="; cat $r/name; cat $r/firmware; cat $r/state; done
+dmesg | egrep -i 'remoteproc|rproc-virtio|rpmsg|pru' | tail -n 80
+ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || true
+uname -r
+grep -E '^(uname_r|uboot_overlay_pru)=' /boot/uEnv.txt || true
 ```
 
-Important: legacy overlays like `AM335X-PRU-RPROC-4-19-TI-00A0.dtbo` are intended for 4.19-ti era kernels and can be incompatible on newer kernels.
+If `uboot_overlay_pru=AM335X-PRU-UIO-00A0.dtbo`, RPMsg remoteproc firmware is not expected to work.
 
-Resolution options:
+### Fix path (safe + reversible)
 
-1. Boot a kernel/device-tree combo known to support PRU RPMsg kick for AM335x.
-2. For diagnostic-only bring-up, build firmware without RPMsg vdev (not suitable for this project's daemon API).
+Use the fixup script:
+
+```bash
+./beaglebone/scripts/pru_rpmsg_fixup.sh --plan
+./beaglebone/scripts/pru_rpmsg_fixup.sh --apply
+sudo reboot
+./beaglebone/scripts/deploy_firmware.sh
+```
+
+If needed, restore last backup:
+
+```bash
+./beaglebone/scripts/pru_rpmsg_fixup.sh --revert
+sudo reboot
+```
+
+Notes:
+
+- The script only selects kernels already installed in `/boot/vmlinuz-*`.
+- Overlay names imply kernel series compatibility. Example: `AM335X-PRU-RPROC-4-19-TI-...` is for a 4.19-ti series kernel.
+- If no installed kernel has a matching `AM335X-PRU-RPROC-*` overlay, install a compatible `*-ti` kernel (commonly 5.10-ti), then rerun `--plan`.
 
 ## 2) rpmsg Device Missing
 
@@ -85,39 +90,8 @@ Likely command update timeout is too short for your test loop.
 Build:
 
 ```bash
-make -C beaglebone/pru_fw
-```
-
-If build fails with `pru-gcc: No such file or directory` on Debian `trixie`, install the TI PRU compiler package and rerun the wrapper script:
-
-```bash
-sudo apt install -y ti-pru-cgt-v2.3
-./beaglebone/scripts/build_pru.sh
-```
-
-`build_pru.sh` now supports either:
-
-- `pru-gcc` (preferred when available), or
-- TI tools `clpru` + `lnkpru` (from `ti-pru-cgt-v2.3`).
-
-If TI link fails with unresolved `pru_rpmsg_*` symbols, your PRU SSP path is missing RPMsg implementation objects/libraries. The script auto-detects either:
-
-- `rpmsg_lib.lib` / `pru_rpmsg*.lib`, or
-- `pru_rpmsg.c`
-
-If auto-detect fails, set one explicitly:
-
-```bash
-PRU_TI_RPMSG_LIB=/path/to/rpmsg_lib.lib ./beaglebone/scripts/build_pru.sh
-# or
-PRU_TI_RPMSG_SRC=/path/to/pru_rpmsg.c ./beaglebone/scripts/build_pru.sh
-```
-
-If link fails with unresolved `pru_virtqueue_*` symbols, include virtqueue source too:
-
-```bash
-PRU_TI_RPMSG_SRC=/path/to/pru_rpmsg.c \
-PRU_TI_VIRTQUEUE_SRC=/path/to/pru_virtqueue.c \
+export PRU_SSP=~/pru-software-support-package
+export PRU_CMD_FILE=$PRU_SSP/include/am335x-pru.cmd
 ./beaglebone/scripts/build_pru.sh
 ```
 
@@ -127,9 +101,10 @@ Deploy:
 ./beaglebone/scripts/deploy_firmware.sh
 ```
 
-Verify loaded names and recent logs:
+Validate:
 
 ```bash
-ls -l /lib/firmware/am335x-pru*-fw
-journalctl -u bbb-base-daemon.service -n 200 --no-pager
+for r in /sys/class/remoteproc/remoteproc1 /sys/class/remoteproc/remoteproc2; do echo "== $r =="; cat $r/name; cat $r/firmware; cat $r/state; done
+dmesg | egrep -i 'remoteproc|rproc-virtio|rpmsg|pru' | tail -n 80
+ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || true
 ```

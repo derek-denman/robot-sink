@@ -13,9 +13,35 @@
 ./beaglebone/scripts/install_deps.sh
 ```
 
-## 3) Build PRU Firmware
+## 3) Kernel/overlay prerequisites for RPMsg
+
+RPMsg PRU firmware requires a **remoteproc/RPROC** kernel + overlay pair.
+
+Quick checks:
 
 ```bash
+uname -r
+grep -E '^(uname_r|uboot_overlay_pru)=' /boot/uEnv.txt || true
+ls -1 /boot/vmlinuz-* | sed 's|.*/vmlinuz-||'
+ls -1 /boot/dtbs/$(uname -r)/overlays/AM335X-PRU-*.dtbo 2>/dev/null || true
+```
+
+If `uboot_overlay_pru` is `AM335X-PRU-UIO-00A0.dtbo`, or no `AM335X-PRU-RPROC-*` overlay exists for the selected kernel, run:
+
+```bash
+./beaglebone/scripts/pru_rpmsg_fixup.sh --plan
+# then, if the plan looks correct:
+./beaglebone/scripts/pru_rpmsg_fixup.sh --apply
+sudo reboot
+```
+
+Overlay names like `AM335X-PRU-RPROC-4-19-TI-...` imply a matching kernel series; do not mix unrelated series.
+
+## 4) Build PRU Firmware
+
+```bash
+export PRU_SSP=~/pru-software-support-package
+export PRU_CMD_FILE=$PRU_SSP/include/am335x-pru.cmd
 ./beaglebone/scripts/build_pru.sh
 ```
 
@@ -24,13 +50,27 @@ Expected outputs:
 - `beaglebone/pru_fw/pru0_encoders/am335x-pru0-fw`
 - `beaglebone/pru_fw/pru1_sabertooth/am335x-pru1-fw`
 
-## 4) Deploy Firmware + Start PRUs
+## 5) Deploy Firmware + Start PRUs
 
 ```bash
 ./beaglebone/scripts/deploy_firmware.sh
 ```
 
-## 5) Start Daemon (manual run first)
+Expected deploy success criteria:
+
+- `remoteproc1` and `remoteproc2` report `state=running`
+- firmware entries show `am335x-pru0-fw` and `am335x-pru1-fw`
+- RPMsg device nodes are present (`/dev/rpmsg*` and/or `/dev/ttyRPMSG*`)
+
+Validation checks:
+
+```bash
+for r in /sys/class/remoteproc/remoteproc1 /sys/class/remoteproc/remoteproc2; do echo "== $r =="; cat $r/name; cat $r/firmware; cat $r/state; done
+dmesg | egrep -i 'remoteproc|rproc-virtio|rpmsg|pru' | tail -n 80
+ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || true
+```
+
+## 6) Start Daemon (manual run first)
 
 ```bash
 python3 beaglebone/host_daemon/bbb_base_daemon.py \
@@ -45,7 +85,7 @@ python3 beaglebone/host_daemon/bbb_base_daemon.py \
   --dry-run
 ```
 
-## 6) Validate API + Encoder Flow
+## 7) Validate API + Encoder Flow
 
 ```bash
 python3 beaglebone/tools/cli_test.py status
@@ -59,7 +99,7 @@ Reset encoders:
 python3 beaglebone/tools/cli_test.py reset-encoders
 ```
 
-## 7) GUI
+## 8) GUI
 
 Open:
 
@@ -72,13 +112,13 @@ Use sequence:
 3. Trigger E-STOP
 4. Re-arm after hold period
 
-## 8) Enable Service
+## 9) Enable Service
 
 ```bash
 ./beaglebone/scripts/enable_services.sh
 ```
 
-## 9) Bench Plan
+## 10) Bench Plan
 
 1. **No motors connected**: verify PRU1 TX waveform on selected TX pin and baud timing.
 2. **Motors off-ground**: verify direction, S2 stop action, and watchdog trip behavior.
