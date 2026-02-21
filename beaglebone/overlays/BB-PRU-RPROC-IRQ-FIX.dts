@@ -1,0 +1,30 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "ti,am33xx";
+
+    /*
+     * 6.1-ti PRU nodes on some AM335x images miss vring interrupt wiring.
+     * Add the same mapping used by known-good 5.10-ti device trees:
+     *   pru0 vring -> system event 16 -> host 2
+     *   pru1 vring -> system event 18 -> host 3
+     */
+    fragment@0 {
+        target = <&pru0>;
+        __overlay__ {
+            interrupt-parent = <&pruss_intc>;
+            interrupts = <16 2 2>;
+            interrupt-names = "vring";
+        };
+    };
+
+    fragment@1 {
+        target = <&pru1>;
+        __overlay__ {
+            interrupt-parent = <&pruss_intc>;
+            interrupts = <18 3 3>;
+            interrupt-names = "vring";
+        };
+    };
+};

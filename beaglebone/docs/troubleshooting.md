@@ -117,7 +117,41 @@ kill $DAEMON_PID || true
 sudo kill $DMESG_PID || true
 ```
 
-## 3) rpmsg Device Missing
+## 3) PRU boot fails with `IRQ vring not found` / `Boot failed: -6`
+
+### Symptom
+
+On some `6.1-ti` images, `deploy_firmware.sh` reports:
+
+```text
+pru-rproc ... error -ENXIO: IRQ vring not found
+remoteproc ... unable to get vring interrupt, status = -6
+remoteproc ... Boot failed: -6
+```
+
+### Cause
+
+The running DTB can expose PRU nodes without the vring interrupt wiring (`interrupt-parent` / `interrupts` / `interrupt-names`) expected by `pru_rproc`.
+
+### Fix path
+
+Use the in-repo IRQ fix overlay helper:
+
+```bash
+./beaglebone/scripts/pru_rproc_irq_fix.sh --plan
+./beaglebone/scripts/pru_rproc_irq_fix.sh --apply
+sudo reboot
+./beaglebone/scripts/deploy_firmware.sh
+```
+
+Revert if needed:
+
+```bash
+./beaglebone/scripts/pru_rproc_irq_fix.sh --revert
+sudo reboot
+```
+
+## 4) rpmsg Device Missing
 
 Expected defaults:
 
@@ -126,7 +160,7 @@ Expected defaults:
 
 If names differ, update `beaglebone/host_daemon/config.yaml` (`pru.encoder_rpmsg_dev`, `pru.motor_rpmsg_dev`).
 
-## 4) Daemon Runs But No Encoder Updates
+## 5) Daemon Runs But No Encoder Updates
 
 - Confirm encoder input pins are muxed to PRU0 inputs.
 - Confirm 5V->3.3V buffering is present and grounds are common.
@@ -136,21 +170,21 @@ If names differ, update `beaglebone/host_daemon/config.yaml` (`pru.encoder_rpmsg
 python3 beaglebone/tools/log_encoders.py --period 0.1
 ```
 
-## 5) Motors Do Not Move
+## 6) Motors Do Not Move
 
 - Confirm mode/baud/address in `config.yaml` match Sabertooth DIP setup.
 - Confirm S1 receives TX from selected PRU1 TX pin.
 - Confirm S2 is released only after arm.
 - Confirm no active estop/watchdog state in `/api/status`.
 
-## 6) Immediate Watchdog Trips
+## 7) Immediate Watchdog Trips
 
 Likely command update timeout is too short for your test loop.
 
 - Increase `safety.command_timeout_ms` in `config.yaml`.
 - Keep GUI/CLI sending commands periodically while armed.
 
-## 7) Validate Firmware Build/Load
+## 8) Validate Firmware Build/Load
 
 Build:
 

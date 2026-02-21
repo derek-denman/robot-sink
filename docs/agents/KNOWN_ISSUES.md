@@ -55,6 +55,22 @@ Back: [Agent Index](INDEX.md) | [Root Start Here](../../AGENTS.md)
   sudo reboot
   ```
 
+### 3b) PRU Boot Fails `IRQ vring not found` (`Boot failed: -6`)
+- Symptom: `pru-rproc ... IRQ vring not found` and PRU remoteproc boot fails with `-6`.
+- Diagnosis: PRU DT node lacks vring interrupt wiring for `pru_rproc`.
+- Use:
+  ```bash
+  ./beaglebone/scripts/pru_rproc_irq_fix.sh --plan
+  ./beaglebone/scripts/pru_rproc_irq_fix.sh --apply
+  sudo reboot
+  ./beaglebone/scripts/deploy_firmware.sh
+  ```
+- Revert:
+  ```bash
+  ./beaglebone/scripts/pru_rproc_irq_fix.sh --revert
+  sudo reboot
+  ```
+
 ## 4) `bb-usb-gadgets` unstable (`Device or resource busy` / missing IPv4)
 - Symptom: USB gadget networking is flaky or comes up without usable IPv4.
 - Diagnosis: gadget and network manager interactions are racing.

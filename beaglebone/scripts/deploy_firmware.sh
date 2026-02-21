@@ -17,6 +17,7 @@ RPROC_START_TIMEOUT="10s"
 
 FIXUP_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rpmsg_fixup.sh"
 KERNEL_HOP_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rpmsg_kernel_hop.sh"
+IRQ_FIX_SCRIPT="${REPO_ROOT}/beaglebone/scripts/pru_rproc_irq_fix.sh"
 
 if [[ ! -f "${PRU0_FW_SRC}" || ! -f "${PRU1_FW_SRC}" ]]; then
   echo "[deploy_firmware] ERROR: firmware binaries are missing." >&2
@@ -134,6 +135,23 @@ print_rpmsg_kick_oops_guidance() {
   fi
 }
 
+print_vring_irq_failure_guidance() {
+  echo "[deploy_firmware] detected PRU remoteproc vring IRQ mapping failure (Boot failed: -6)." >&2
+  echo "[deploy_firmware] remediation options:" >&2
+  if [[ -x "${IRQ_FIX_SCRIPT}" ]]; then
+    echo "  1) Inspect irq-fix overlay plan:" >&2
+    echo "     ./beaglebone/scripts/pru_rproc_irq_fix.sh --plan" >&2
+    echo "  2) Apply irq-fix overlay + reboot:" >&2
+    echo "     ./beaglebone/scripts/pru_rproc_irq_fix.sh --apply" >&2
+    echo "     sudo reboot" >&2
+    echo "     ./beaglebone/scripts/deploy_firmware.sh" >&2
+  fi
+  if [[ -x "${KERNEL_HOP_SCRIPT}" ]]; then
+    echo "  3) Re-evaluate kernel/overlay compatibility:" >&2
+    echo "     ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --plan" >&2
+  fi
+}
+
 print_failure_diagnostics() {
   local dmesg_hints="$1"
 
@@ -154,6 +172,10 @@ print_failure_diagnostics() {
 
   if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|oops: [0-9]'; then
     print_rpmsg_kick_oops_guidance
+  fi
+
+  if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|boot failed: -6'; then
+    print_vring_irq_failure_guidance
   fi
 }
 

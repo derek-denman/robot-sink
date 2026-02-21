@@ -79,6 +79,15 @@ sudo reboot
 ./beaglebone/scripts/deploy_firmware.sh
 ```
 
+If deploy fails with vring IRQ errors (`Boot failed: -6`, `IRQ vring not found`), apply the PRU IRQ overlay fix:
+
+```bash
+./beaglebone/scripts/pru_rproc_irq_fix.sh --plan
+./beaglebone/scripts/pru_rproc_irq_fix.sh --apply
+sudo reboot
+./beaglebone/scripts/deploy_firmware.sh
+```
+
 ## 6) Start Daemon (manual run first)
 
 ```bash
