@@ -39,6 +39,22 @@ Back: [Agent Index](INDEX.md) | [Root Start Here](../../AGENTS.md)
   - Overlay names encode expected kernel series (for example, `...-4-19-TI-...`).
   - Detailed guidance: `beaglebone/docs/troubleshooting.md` and `beaglebone/docs/bringup.md`.
 
+### 3a) Kernel Oops in RPMsg kick path (`pru_rproc_kick`)
+- Symptom: `dmesg` shows `Internal error: Oops` with `PC is at pru_rproc_kick...` after daemon or RPMsg writes.
+- Diagnosis: active kernel/overlay combination is unstable for RPMsg kick path on this image.
+- Use:
+  ```bash
+  ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --plan
+  ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --apply
+  sudo reboot
+  ./beaglebone/scripts/deploy_firmware.sh
+  ```
+- Revert:
+  ```bash
+  ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --revert
+  sudo reboot
+  ```
+
 ## 4) `bb-usb-gadgets` unstable (`Device or resource busy` / missing IPv4)
 - Symptom: USB gadget networking is flaky or comes up without usable IPv4.
 - Diagnosis: gadget and network manager interactions are racing.

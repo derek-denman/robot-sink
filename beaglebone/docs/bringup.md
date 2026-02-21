@@ -70,6 +70,15 @@ dmesg | egrep -i 'remoteproc|rproc-virtio|rpmsg|pru' | tail -n 80
 ls -l /dev/rpmsg* /dev/ttyRPMSG* 2>/dev/null || true
 ```
 
+If `deploy_firmware.sh` reports kernel Oops signatures (`pru_rproc_kick`) or boot `-22`, use kernel-hop tooling:
+
+```bash
+./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --plan
+./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --apply
+sudo reboot
+./beaglebone/scripts/deploy_firmware.sh
+```
+
 ## 6) Start Daemon (manual run first)
 
 ```bash
@@ -85,7 +94,35 @@ python3 beaglebone/host_daemon/bbb_base_daemon.py \
   --dry-run
 ```
 
-## 7) Validate API + Encoder Flow
+## 7) RPMsg Stability Regression Check
+
+Run this on BeagleBone after firmware deploy to verify no kernel crash in `pru_rproc_kick` under live traffic:
+
+```bash
+sudo dmesg -C
+sudo dmesg -wH > /tmp/rpmsg_watch.log 2>&1 &
+DMESG_PID=$!
+
+sudo /home/debian/robot-sink/beaglebone/host_daemon/.venv/bin/python3 \
+  /home/debian/robot-sink/beaglebone/host_daemon/bbb_base_daemon.py \
+  --config /home/debian/robot-sink/beaglebone/host_daemon/config.yaml \
+  > /tmp/bbb_daemon.log 2>&1 &
+DAEMON_PID=$!
+
+sleep 2
+for i in $(seq 1 20); do python3 beaglebone/tools/cli_test.py status >/dev/null || true; sleep 0.25; done
+
+dmesg -T | egrep -i 'remoteproc|rpmsg|pru_rproc_kick|oops|segfault' | tail -n 120
+
+grep -Eiq 'pru_rproc_kick|Internal error: Oops|Boot failed: -22|kick method not defined' /tmp/rpmsg_watch.log \
+  && echo "FAIL: RPMsg kernel path unstable" \
+  || echo "PASS: no RPMsg kick-path crash signature observed"
+
+kill $DAEMON_PID || true
+sudo kill $DMESG_PID || true
+```
+
+## 8) Validate API + Encoder Flow
 
 ```bash
 python3 beaglebone/tools/cli_test.py status
@@ -99,7 +136,7 @@ Reset encoders:
 python3 beaglebone/tools/cli_test.py reset-encoders
 ```
 
-## 8) GUI
+## 9) GUI
 
 Open:
 
@@ -112,13 +149,13 @@ Use sequence:
 3. Trigger E-STOP
 4. Re-arm after hold period
 
-## 9) Enable Service
+## 10) Enable Service
 
 ```bash
 ./beaglebone/scripts/enable_services.sh
 ```
 
-## 10) Bench Plan
+## 11) Bench Plan
 
 1. **No motors connected**: verify PRU1 TX waveform on selected TX pin and baud timing.
 2. **Motors off-ground**: verify direction, S2 stop action, and watchdog trip behavior.
