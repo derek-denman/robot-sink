@@ -54,6 +54,9 @@ volatile register uint32_t __R31;
 #define DEFAULT_CONTROL_PERIOD_US 10000u
 
 #define RPMSG_VRING_SIZE 16
+#define RPMSG_NOTIFYID_VDEV 0u
+#define RPMSG_NOTIFYID_VRING0 1u
+#define RPMSG_NOTIFYID_VRING1 2u
 
 struct my_resource_table {
     struct resource_table base;
@@ -77,7 +80,7 @@ struct my_resource_table resourceTable = {
     .rpmsg_vdev = {
         .type = TYPE_VDEV,
         .id = VIRTIO_ID_RPMSG,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VDEV,
         .dfeatures = 1 << VIRTIO_RPMSG_F_NS,
         .gfeatures = 0,
         .config_len = 0,
@@ -89,14 +92,14 @@ struct my_resource_table resourceTable = {
         .da = FW_RSC_ADDR_ANY,
         .align = 16,
         .num = RPMSG_VRING_SIZE,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VRING0,
         .reserved = 0,
     },
     .rpmsg_vring1 = {
         .da = FW_RSC_ADDR_ANY,
         .align = 16,
         .num = RPMSG_VRING_SIZE,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VRING1,
         .reserved = 0,
     },
 };
