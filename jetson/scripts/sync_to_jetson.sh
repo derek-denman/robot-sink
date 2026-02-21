@@ -64,6 +64,9 @@ else
   ROOT="$(pwd)"
 fi
 
+RSYNC_VERSION_LINE="$(rsync --version | head -n 1 || true)"
+log "local rsync: ${RSYNC_VERSION_LINE}"
+
 EXCLUDES_FILE="${ROOT}/jetson/scripts/sync_to_jetson.exclude"
 if [[ ! -f "${EXCLUDES_FILE}" ]]; then
   log "Missing excludes file: ${EXCLUDES_FILE}"
@@ -85,9 +88,17 @@ RSYNC_OPTS=(
   -avh
   --compress
   --partial
-  --info=stats2,progress2
   --exclude-from="${EXCLUDES_FILE}"
 )
+
+if rsync --help 2>&1 | grep -q -- "--info"; then
+  RSYNC_OPTS+=(--info=stats2,progress2)
+elif rsync --help 2>&1 | grep -q -- "--progress"; then
+  RSYNC_OPTS+=(--progress)
+  log "Using --progress (older rsync detected)."
+else
+  log "No rsync progress flag support detected; continuing without progress output."
+fi
 
 if [[ ${DRY_RUN} -eq 1 ]]; then
   RSYNC_OPTS+=(--dry-run)
