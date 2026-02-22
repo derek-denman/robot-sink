@@ -9,6 +9,14 @@ foxglove:
 safety:
   command_timeout_sec: 0.8
 
+streaming:
+  scan_push_hz: 8.0
+  camera_stream_hz: 12.0
+
+manual_control:
+  bank_linear_scale: 0.8
+  bank_angular_scale: 1.7
+
 topics:
   cmd_vel: /cmd_vel
   scan: /scan
@@ -18,6 +26,10 @@ topics:
   camera_topics:
     - /oak/rgb/image_raw
     - /oak/stereo/image_raw
+  camera_compressed_topics:
+    - /oak/rgb/image_rect/compressed
+    - /oak/rgb/image_raw/compressed
+  camera_stream_topic: /oak/rgb/image_rect/compressed
   navigate_to_pose: /navigate_to_pose
   initial_pose: /initialpose
   slam_pause: /slam_toolbox/pause_new_measurements
@@ -28,6 +40,7 @@ topics:
   arm_gripper: /arm/gripper_cmd
   arm_pose: /arm/pose_cmd
   arm_joint_jog: /arm/joint_jog
+  arm_joints: /arm/joints_cmd
   arm_stop: /arm/stop
 
 bagging:

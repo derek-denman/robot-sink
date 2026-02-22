@@ -45,6 +45,7 @@ class RosbagRecorder:
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._active: Optional[BagSession] = None
+        self._ros2_bag_stop_supported: Optional[bool] = None
 
     @property
     def storage_path(self) -> Path:
@@ -98,24 +99,32 @@ class RosbagRecorder:
 
             stop_meta: Dict[str, Any] = {}
             stop_cmd = ["ros2", "bag", "stop"]
-            try:
-                stop_result = subprocess.run(
-                    stop_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=4.0,
-                )
+            if self._bag_stop_supported():
+                try:
+                    stop_result = subprocess.run(
+                        stop_cmd,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=4.0,
+                    )
+                    stop_meta = {
+                        "stop_command": " ".join(stop_cmd),
+                        "stop_supported": True,
+                        "stop_returncode": stop_result.returncode,
+                        "stop_stdout": stop_result.stdout[-200:],
+                        "stop_stderr": stop_result.stderr[-200:],
+                    }
+                except (OSError, subprocess.SubprocessError):
+                    stop_meta = {
+                        "stop_command": " ".join(stop_cmd),
+                        "stop_supported": True,
+                        "stop_error": "ros2_bag_stop_failed_to_execute",
+                    }
+            else:
                 stop_meta = {
                     "stop_command": " ".join(stop_cmd),
-                    "stop_returncode": stop_result.returncode,
-                    "stop_stdout": stop_result.stdout[-200:],
-                    "stop_stderr": stop_result.stderr[-200:],
-                }
-            except (OSError, subprocess.SubprocessError):
-                stop_meta = {
-                    "stop_command": " ".join(stop_cmd),
-                    "stop_error": "ros2_bag_stop_failed_to_execute",
+                    "stop_supported": False,
                 }
 
             if proc.poll() is None:
@@ -142,6 +151,26 @@ class RosbagRecorder:
                 "returncode": proc.returncode,
                 **stop_meta,
             }
+
+    def _bag_stop_supported(self) -> bool:
+        cached = self._ros2_bag_stop_supported
+        if cached is not None:
+            return cached
+
+        try:
+            result = subprocess.run(
+                ["ros2", "bag", "--help"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+            help_text = f"{result.stdout}\n{result.stderr}".lower()
+            self._ros2_bag_stop_supported = " stop" in help_text or "\nstop" in help_text
+        except (OSError, subprocess.SubprocessError):
+            self._ros2_bag_stop_supported = False
+
+        return bool(self._ros2_bag_stop_supported)
 
     def active(self) -> Optional[Dict[str, Any]]:
         with self._lock:

@@ -19,6 +19,8 @@ class DiagnosticsProvider:
         odom_age = self._adapters.topic_age_sec("odom")
         scan_age = self._adapters.topic_age_sec("scan")
         camera_age = self._adapters.topic_age_sec("camera")
+        camera_stream = self._adapters.camera_stream_status()
+        scan_stream = self._adapters.scan_stream_status()
 
         return {
             "base_connected": odom_age is not None and odom_age < 2.0,
@@ -28,9 +30,15 @@ class DiagnosticsProvider:
             "lidar_rate_hz": rates.get("scan", 0.0),
             "odom_rate_hz": rates.get("odom", 0.0),
             "oak_rate_hz": rates.get("camera", 0.0),
+            "camera_stream_rate_hz": rates.get(
+                f"camera_stream:{camera_stream.get('selected_topic', '')}", 0.0
+            ),
             "scan_age_sec": scan_age,
             "odom_age_sec": odom_age,
             "camera_age_sec": camera_age,
+            "camera_stream_age_sec": camera_stream.get("age_sec"),
+            "scan_stream_connected": scan_stream.get("connected", False),
+            "camera_stream_connected": camera_stream.get("connected", False),
             "nav": self._adapters.navigation_status(),
         }
 

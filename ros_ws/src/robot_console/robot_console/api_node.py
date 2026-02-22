@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import copy
 import json
 import os
@@ -34,6 +35,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "safety": {
         "command_timeout_sec": 0.8,
     },
+    "streaming": {
+        "scan_push_hz": 8.0,
+        "camera_stream_hz": 12.0,
+    },
+    "manual_control": {
+        "bank_linear_scale": 0.8,
+        "bank_angular_scale": 1.7,
+    },
     "topics": {
         "cmd_vel": "/cmd_vel",
         "scan": "/scan",
@@ -41,6 +50,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "tf": "/tf",
         "tf_static": "/tf_static",
         "camera_topics": ["/oak/rgb/image_raw", "/oak/stereo/image_raw"],
+        "camera_compressed_topics": ["/oak/rgb/image_rect/compressed"],
+        "camera_stream_topic": "/oak/rgb/image_rect/compressed",
         "navigate_to_pose": "/navigate_to_pose",
         "initial_pose": "/initialpose",
         "slam_pause": "/slam_toolbox/pause_new_measurements",
@@ -51,6 +62,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "arm_gripper": "/arm/gripper_cmd",
         "arm_pose": "/arm/pose_cmd",
         "arm_joint_jog": "/arm/joint_jog",
+        "arm_joints": "/arm/joints_cmd",
         "arm_stop": "/arm/stop",
     },
     "bagging": {
@@ -142,8 +154,14 @@ class RobotConsoleApiNode(Node):
         }
         self._demo_cancel = threading.Event()
 
+        scan_push_hz = float(self._config.get("streaming", {}).get("scan_push_hz", 8.0))
+        scan_push_hz = max(1.0, min(20.0, scan_push_hz))
+        self._scan_push_period = 1.0 / scan_push_hz
+        self._last_scan_push_stamp = 0.0
+
         self._heartbeat_timer = self.create_timer(0.1, self._watchdog_tick)
-        self._status_timer = self.create_timer(0.5, self._status_tick)
+        self._status_timer = self.create_timer(0.4, self._status_tick)
+        self._scan_timer = self.create_timer(self._scan_push_period, self._scan_tick)
 
         self.get_logger().info(
             f"Robot console API configured on {self._config['server']['host']}:"
@@ -201,6 +219,9 @@ class RobotConsoleApiNode(Node):
         reliability = self.diagnostics.reliability_snapshot()
         nav_status = self.adapters.navigation_status()
 
+        scan_status = self.adapters.scan_stream_status()
+        camera_status = self.adapters.camera_stream_status()
+
         return {
             "timestamp_unix": time.time(),
             "mode": self.mode_manager.current_mode().value,
@@ -223,6 +244,13 @@ class RobotConsoleApiNode(Node):
             },
             "reliability": reliability,
             "commissioning": commissioning,
+            "visualizer": {
+                "scan": scan_status,
+                "camera": camera_status,
+            },
+            "connection": {
+                "ws_clients": len(self._ws_clients),
+            },
             "foxglove": {
                 "port": self._config.get("foxglove", {}).get("port", 8765),
                 "url_template": "ws://<jetson>:" + str(self._config.get("foxglove", {}).get("port", 8765)),
@@ -238,28 +266,47 @@ class RobotConsoleApiNode(Node):
     def _status_tick(self) -> None:
         self._queue_status_push()
 
-    def _queue_status_push(self) -> None:
-        if not self._loop or not self._ws_clients:
+    def _scan_tick(self) -> None:
+        scan = self.adapters.latest_scan_snapshot()
+        if not scan:
             return
 
+        stamp = float(scan.get("stamp_unix", 0.0))
+        if stamp <= 0.0 or stamp <= self._last_scan_push_stamp:
+            return
+
+        self._last_scan_push_stamp = stamp
+        self._queue_scan_push(scan)
+
+    def _queue_coro(self, coro: Any) -> None:
+        if not self._loop:
+            return
         try:
-            asyncio.run_coroutine_threadsafe(self.broadcast_status(), self._loop)
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
         except RuntimeError:
             return
 
-    async def broadcast_status(self) -> None:
+    def _queue_status_push(self) -> None:
+        if not self._ws_clients:
+            return
+        self._queue_coro(self.broadcast_event("status", self.snapshot()))
+
+    def _queue_scan_push(self, payload: Dict[str, Any]) -> None:
+        if not self._ws_clients:
+            return
+        self._queue_coro(self.broadcast_event("scan", payload))
+
+    async def broadcast_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         if not self._ws_clients:
             return
 
-        payload = json.dumps({"type": "status", "data": self.snapshot()})
+        message = json.dumps({"type": event_type, "data": payload})
 
         dead = []
         for ws in self._ws_clients:
             try:
-                await ws.send_str(payload)
-            except ConnectionResetError:
-                dead.append(ws)
-            except RuntimeError:
+                await ws.send_str(message)
+            except (ConnectionResetError, RuntimeError):
                 dead.append(ws)
 
         for ws in dead:
@@ -373,6 +420,11 @@ class RobotConsoleApiNode(Node):
             result["observed"] = f"frames_ok={frames_ok}"
             result["passed"] = frames_ok
 
+        elif check_id == "mode_persistence_manual":
+            result["expected"] = "Mode should persist across refresh + websocket reconnect"
+            result["observed"] = "Operator marked mode persistence verified"
+            result["passed"] = True
+
         else:
             result["expected"] = "Known check id"
             result["observed"] = "unknown check"
@@ -454,6 +506,13 @@ def _app_response(ok: bool, **kwargs: Any) -> web.Response:
     return web.json_response(body)
 
 
+def _normalize_bank(value: Any) -> float:
+    normalized = float(value)
+    if abs(normalized) > 1.0:
+        normalized = normalized / 100.0
+    return max(-1.0, min(1.0, normalized))
+
+
 def create_app(node: RobotConsoleApiNode) -> web.Application:
     app = web.Application()
 
@@ -462,6 +521,27 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
 
     async def get_config(_request: web.Request) -> web.Response:
         return web.json_response(node.config)
+
+    async def get_scan(_request: web.Request) -> web.Response:
+        payload = node.adapters.latest_scan_snapshot()
+        if payload is None:
+            return _app_response(False, error="scan_not_available")
+        return _app_response(True, scan=payload)
+
+    async def get_camera_topics(_request: web.Request) -> web.Response:
+        status = node.adapters.camera_stream_status()
+        return _app_response(
+            True,
+            selected_topic=status.get("selected_topic"),
+            topics=status.get("available_topics", []),
+        )
+
+    async def set_camera_topic(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        topic = str(payload.get("topic", "")).strip()
+        result = node.adapters.select_camera_stream_topic(topic)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
 
     async def set_mode(request: web.Request) -> web.Response:
         payload = await _json_request(request)
@@ -481,6 +561,29 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
 
     async def disarm(_request: web.Request) -> web.Response:
         node.mode_manager.disarm(reason="operator")
+        node.adapters.publish_stop()
+        node._queue_status_push()
+        return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+
+    async def arm_state(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        desired = payload.get("armed")
+        action = str(payload.get("action", "")).strip().lower()
+
+        if isinstance(desired, bool):
+            should_arm = desired
+        elif action in {"arm", "disarm"}:
+            should_arm = action == "arm"
+        else:
+            return _app_response(False, error="expected 'armed':bool or action arm/disarm")
+
+        if should_arm:
+            if node.mode_manager.arm():
+                node._queue_status_push()
+                return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
+            return _app_response(False, error="estop_latched")
+
+        node.mode_manager.disarm(reason="api_arm_endpoint")
         node.adapters.publish_stop()
         node._queue_status_push()
         return _app_response(True, safety=node.mode_manager.safety_snapshot().to_dict())
@@ -516,6 +619,19 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         node.adapters.publish_cmd_vel(linear, angular)
         node.mode_manager.record_motion_command()
         return _app_response(True, linear_x=linear, angular_z=angular)
+
+    async def motor_bank(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        if node.mode_manager.current_mode() != RobotMode.MANUAL:
+            return _app_response(False, error="manual_mode_required")
+        if not node.mode_manager.should_allow_motion():
+            return _app_response(False, error="robot_not_armed")
+
+        left = _normalize_bank(payload.get("left", 0.0))
+        right = _normalize_bank(payload.get("right", 0.0))
+        result = node.adapters.publish_motor_bank(left=left, right=right)
+        node.mode_manager.record_motion_command()
+        return _app_response(True, result=result)
 
     async def set_initial_pose(request: web.Request) -> web.Response:
         payload = await _json_request(request)
@@ -610,9 +726,31 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         result = node.adapters.jog_joint(joint=joint, delta=delta)
         return _app_response(result.get("ok", False), result=result)
 
+    async def arm_joints(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        joints = payload.get("joints", {})
+        if not isinstance(joints, dict):
+            return _app_response(False, error="joints must be an object")
+
+        cleaned: Dict[str, float] = {}
+        for name, value in joints.items():
+            try:
+                cleaned[str(name)] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        if not cleaned:
+            return _app_response(False, error="no_valid_joint_values")
+
+        result = node.adapters.command_joints(cleaned)
+        return _app_response(result.get("ok", False), result=result)
+
     async def arm_stop(_request: web.Request) -> web.Response:
         result = node.adapters.stop_arm()
         return _app_response(result.get("ok", False), result=result)
+
+    async def gripper_alias(request: web.Request) -> web.Response:
+        return await arm_gripper(request)
 
     async def pick_place_start(_request: web.Request) -> web.Response:
         node.set_pick_place_state(active=True, stage="seeking", retry_count=0)
@@ -697,16 +835,80 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         node._ws_clients.add(ws)
         await ws.send_json({"type": "status", "data": node.snapshot()})
 
+        scan = node.adapters.latest_scan_snapshot()
+        if scan:
+            await ws.send_json({"type": "scan", "data": scan})
+
         try:
             async for msg in ws:
-                if msg.type == WSMsgType.TEXT and msg.data == "ping":
-                    await ws.send_str("pong")
+                if msg.type == WSMsgType.TEXT:
+                    if msg.data == "ping":
+                        await ws.send_str("pong")
+                    else:
+                        with contextlib.suppress(Exception):
+                            payload = json.loads(msg.data)
+                            if isinstance(payload, dict) and payload.get("type") == "camera_select":
+                                topic = str(payload.get("topic", "")).strip()
+                                if topic:
+                                    node.adapters.select_camera_stream_topic(topic)
                 elif msg.type == WSMsgType.ERROR:
                     break
         finally:
             node._ws_clients.discard(ws)
 
         return ws
+
+    async def camera_mjpeg(request: web.Request) -> web.StreamResponse:
+        topic = request.query.get("topic", "").strip()
+        if topic:
+            node.adapters.select_camera_stream_topic(topic)
+
+        selected = node.adapters.camera_stream_topic()
+        if not selected:
+            return _app_response(False, error="no_camera_topic_selected")
+
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Connection": "close",
+            },
+        )
+        await response.prepare(request)
+
+        last_stamp = 0.0
+        fps = float(node.config.get("streaming", {}).get("camera_stream_hz", 12.0))
+        sleep_sec = max(0.02, 1.0 / max(1.0, min(30.0, fps)))
+
+        try:
+            while True:
+                if request.transport is None or request.transport.is_closing():
+                    break
+
+                frame = node.adapters.latest_camera_frame()
+                if frame and frame.get("data") and frame.get("stamp_unix", 0.0) > last_stamp:
+                    last_stamp = float(frame["stamp_unix"])
+                    jpg = frame["data"]
+                    header = (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(jpg)}\r\n".encode("ascii")
+                        + f"X-Timestamp: {last_stamp:.6f}\r\n\r\n".encode("ascii")
+                    )
+                    await response.write(header + jpg + b"\r\n")
+
+                await asyncio.sleep(sleep_sec)
+
+        except (asyncio.CancelledError, ConnectionResetError, RuntimeError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                await response.write_eof()
+
+        return response
 
     web_root = Path(node.config.get("server", {}).get("web_root", "")).expanduser()
     layout_root = web_root.parent / "layouts"
@@ -742,16 +944,22 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
 
     app.router.add_get("/api/status", get_status)
     app.router.add_get("/api/config", get_config)
+    app.router.add_get("/api/scan", get_scan)
+    app.router.add_get("/api/camera/topics", get_camera_topics)
 
+    app.router.add_post("/api/camera/select", set_camera_topic)
     app.router.add_post("/api/mode", set_mode)
 
     app.router.add_post("/api/safety/arm", arm)
     app.router.add_post("/api/safety/disarm", disarm)
     app.router.add_post("/api/safety/estop", estop)
     app.router.add_post("/api/safety/reset_estop", reset_estop)
+    app.router.add_post("/api/arm", arm_state)
     app.router.add_post("/api/stop_all", stop_all)
 
     app.router.add_post("/api/teleop/cmd_vel", teleop_cmd_vel)
+    app.router.add_post("/api/cmd_vel", teleop_cmd_vel)
+    app.router.add_post("/api/motor_bank", motor_bank)
 
     app.router.add_post("/api/localization/set_initial_pose", set_initial_pose)
 
@@ -767,8 +975,10 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
     app.router.add_post("/api/checklist/run", checklist_run)
 
     app.router.add_post("/api/arm/gripper", arm_gripper)
+    app.router.add_post("/api/gripper", gripper_alias)
     app.router.add_post("/api/arm/pose", arm_pose)
     app.router.add_post("/api/arm/jog", arm_jog)
+    app.router.add_post("/api/arm/joints", arm_joints)
     app.router.add_post("/api/arm/stop", arm_stop)
 
     app.router.add_post("/api/tasks/pick_place/start", pick_place_start)
@@ -789,6 +999,7 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
     app.router.add_post("/api/stack/stop", stack_stop)
 
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/stream/camera.mjpeg", camera_mjpeg)
 
     app.router.add_get("/layouts/{path:.*}", layout_files)
     app.router.add_get("/", index)

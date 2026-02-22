@@ -1,15 +1,16 @@
+import json
 import math
 import threading
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from sensor_msgs.msg import Image, LaserScan
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage, Image, LaserScan
 from std_msgs.msg import String
 from std_srvs.srv import Empty
 from tf2_msgs.msg import TFMessage
@@ -55,6 +56,7 @@ class RosAdapters:
         self._lock = threading.Lock()
 
         topics = config.get("topics", {})
+        manual_cfg = config.get("manual_control", {})
 
         self._cmd_vel_pub = node.create_publisher(Twist, topics.get("cmd_vel", "/cmd_vel"), 10)
         self._initial_pose_pub = node.create_publisher(
@@ -68,6 +70,9 @@ class RosAdapters:
         )
         self._arm_pose_pub = node.create_publisher(String, topics.get("arm_pose", "/arm/pose_cmd"), 10)
         self._arm_jog_pub = node.create_publisher(String, topics.get("arm_joint_jog", "/arm/joint_jog"), 10)
+        self._arm_joints_pub = node.create_publisher(
+            String, topics.get("arm_joints", "/arm/joints_cmd"), 10
+        )
         self._arm_stop_pub = node.create_publisher(String, topics.get("arm_stop", "/arm/stop"), 10)
 
         self._rate = defaultdict(RateTracker)
@@ -80,7 +85,12 @@ class RosAdapters:
         self._tf_topic = topics.get("tf", "/tf")
         self._tf_static_topic = topics.get("tf_static", "/tf_static")
 
-        self._scan_sub = node.create_subscription(LaserScan, self._scan_topic, self._on_scan, 10)
+        self._scan_sub = node.create_subscription(
+            LaserScan,
+            self._scan_topic,
+            self._on_scan,
+            qos_profile_sensor_data,
+        )
         self._odom_sub = node.create_subscription(Odometry, self._odom_topic, self._on_odom, 10)
         self._tf_sub = node.create_subscription(TFMessage, self._tf_topic, self._on_tf, 30)
         self._tf_static_sub = node.create_subscription(
@@ -94,9 +104,23 @@ class RosAdapters:
                     Image,
                     topic,
                     self._make_camera_callback(topic),
-                    10,
+                    qos_profile_sensor_data,
                 )
             )
+
+        self._camera_stream_subs: Dict[str, Any] = {}
+        self._camera_stream_frames: Dict[str, Dict[str, Any]] = {}
+        self._camera_stream_lock = threading.Lock()
+
+        default_stream_topics = topics.get("camera_compressed_topics", [])
+        if not default_stream_topics:
+            default_stream_topics = self._derived_compressed_topics(self._camera_topics)
+
+        explicit_stream_topic = topics.get("camera_stream_topic", "")
+        self._camera_stream_topic = explicit_stream_topic or (default_stream_topics[0] if default_stream_topics else "")
+
+        for topic in default_stream_topics:
+            self.ensure_camera_stream_subscription(topic)
 
         nav_goal_topic = topics.get("navigate_to_pose", "/navigate_to_pose")
         self._nav_client = None
@@ -136,12 +160,76 @@ class RosAdapters:
 
         self._motion_watchdog_enabled = True
 
+        self._scan_payload_lock = threading.Lock()
+        self._latest_scan_payload: Optional[Dict[str, Any]] = None
+
+        self._bank_linear_scale = float(manual_cfg.get("bank_linear_scale", 0.8))
+        self._bank_angular_scale = float(manual_cfg.get("bank_angular_scale", 1.7))
+
+    @staticmethod
+    def _derived_compressed_topics(raw_topics: Sequence[str]) -> List[str]:
+        candidates: List[str] = []
+        for topic in raw_topics:
+            if not topic:
+                continue
+            if topic.endswith("/compressed"):
+                candidates.append(topic)
+                continue
+
+            candidates.append(f"{topic}/compressed")
+            if topic.endswith("/image_raw"):
+                candidates.append(topic.replace("/image_raw", "/image_rect/compressed"))
+
+        # Keep order stable and unique.
+        deduped: List[str] = []
+        seen = set()
+        for topic in candidates:
+            if topic in seen:
+                continue
+            seen.add(topic)
+            deduped.append(topic)
+        return deduped
+
     def _mark_topic(self, key: str) -> None:
         self._rate[key].tick()
         self._last_topic_unix[key] = time.time()
 
-    def _on_scan(self, _msg: LaserScan) -> None:
+    def _on_scan(self, msg: LaserScan) -> None:
         self._mark_topic("scan")
+        payload = self._build_scan_payload(msg)
+        with self._scan_payload_lock:
+            self._latest_scan_payload = payload
+
+    def _build_scan_payload(self, msg: LaserScan, max_points: int = 360) -> Dict[str, Any]:
+        count = len(msg.ranges)
+        step = max(1, count // max(1, max_points))
+
+        points: List[List[float]] = []
+        angle = msg.angle_min
+        for idx, value in enumerate(msg.ranges):
+            if idx % step != 0:
+                angle += msg.angle_increment
+                continue
+
+            r = float(value)
+            valid = math.isfinite(r) and (r >= msg.range_min) and (r <= msg.range_max)
+            if valid:
+                x = round(math.cos(angle) * r, 4)
+                y = round(math.sin(angle) * r, 4)
+                points.append([x, y])
+                if len(points) >= max_points:
+                    break
+
+            angle += msg.angle_increment
+
+        return {
+            "stamp_unix": time.time(),
+            "frame_id": msg.header.frame_id,
+            "range_min": round(float(msg.range_min), 4),
+            "range_max": round(float(msg.range_max), 4),
+            "point_count": len(points),
+            "points": points,
+        }
 
     def _on_odom(self, _msg: Odometry) -> None:
         self._mark_topic("odom")
@@ -163,6 +251,39 @@ class RosAdapters:
 
         return _cb
 
+    def _make_camera_stream_callback(self, topic_name: str) -> Callable[[CompressedImage], None]:
+        key = f"camera_stream:{topic_name}"
+
+        def _cb(msg: CompressedImage) -> None:
+            self._mark_topic("camera_stream")
+            self._mark_topic(key)
+
+            with self._camera_stream_lock:
+                self._camera_stream_frames[topic_name] = {
+                    "stamp_unix": time.time(),
+                    "format": msg.format,
+                    "data": bytes(msg.data),
+                }
+
+                # Select first active stream topic automatically.
+                if not self._camera_stream_topic:
+                    self._camera_stream_topic = topic_name
+
+        return _cb
+
+    def ensure_camera_stream_subscription(self, topic_name: str) -> None:
+        if not topic_name:
+            return
+        if topic_name in self._camera_stream_subs:
+            return
+
+        self._camera_stream_subs[topic_name] = self._node.create_subscription(
+            CompressedImage,
+            topic_name,
+            self._make_camera_stream_callback(topic_name),
+            qos_profile_sensor_data,
+        )
+
     def _remember_frames(self, msg: TFMessage) -> None:
         with self._lock:
             for transform in msg.transforms:
@@ -174,11 +295,16 @@ class RosAdapters:
                     self._tf_frames.add(child)
 
     def topic_rates(self) -> Dict[str, float]:
-        keys = ["scan", "odom", "camera", "tf", "tf_static"]
+        keys = ["scan", "odom", "camera", "camera_stream", "tf", "tf_static"]
         rates = {key: self._rate[key].hz() for key in keys}
         for topic in self._camera_topics:
             key = f"camera:{topic}"
             rates[key] = self._rate[key].hz()
+
+        for topic in self.camera_stream_topics():
+            key = f"camera_stream:{topic}"
+            rates[key] = self._rate[key].hz()
+
         return rates
 
     def topic_age_sec(self, key: str) -> Optional[float]:
@@ -206,6 +332,21 @@ class RosAdapters:
         msg.linear.x = float(linear_x)
         msg.angular.z = float(angular_z)
         self._cmd_vel_pub.publish(msg)
+
+    def publish_motor_bank(self, left: float, right: float) -> Dict[str, float]:
+        left_clamped = max(-1.0, min(1.0, float(left)))
+        right_clamped = max(-1.0, min(1.0, float(right)))
+
+        linear = (left_clamped + right_clamped) * 0.5 * self._bank_linear_scale
+        angular = (right_clamped - left_clamped) * self._bank_angular_scale
+        self.publish_cmd_vel(linear, angular)
+
+        return {
+            "left": round(left_clamped, 4),
+            "right": round(right_clamped, 4),
+            "linear_x": round(linear, 4),
+            "angular_z": round(angular, 4),
+        }
 
     def publish_stop(self) -> None:
         self.publish_cmd_vel(0.0, 0.0)
@@ -245,6 +386,13 @@ class RosAdapters:
         msg.data = f"{joint}:{delta:.4f}"
         self._arm_jog_pub.publish(msg)
         return {"ok": True, "joint": joint, "delta": float(delta)}
+
+    def command_joints(self, joints: Dict[str, float]) -> Dict[str, Any]:
+        payload = {str(name): float(value) for name, value in joints.items()}
+        msg = String()
+        msg.data = json.dumps(payload, separators=(",", ":"))
+        self._arm_joints_pub.publish(msg)
+        return {"ok": True, "joints": payload}
 
     def stop_arm(self) -> Dict[str, Any]:
         msg = String()
@@ -356,6 +504,90 @@ class RosAdapters:
                 "feedback": dict(self._nav_last_feedback),
                 "active": self._nav_goal_handle is not None,
             }
+
+    def latest_scan_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._scan_payload_lock:
+            if self._latest_scan_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_scan_payload))
+
+    def scan_stream_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        scan_age = self.topic_age_sec("scan")
+        payload = self.latest_scan_snapshot()
+        return {
+            "topic": self._scan_topic,
+            "fps": rates.get("scan", 0.0),
+            "age_sec": scan_age,
+            "point_count": (payload or {}).get("point_count", 0),
+            "connected": scan_age is not None and scan_age < 2.0,
+        }
+
+    def camera_stream_topics(self) -> List[str]:
+        discovered = []
+        try:
+            for topic_name, type_names in self._node.get_topic_names_and_types():
+                if "sensor_msgs/msg/CompressedImage" in type_names:
+                    discovered.append(topic_name)
+        except Exception:
+            pass
+
+        combined = list(self._camera_stream_subs.keys()) + discovered
+        deduped: List[str] = []
+        seen = set()
+        for topic in combined:
+            if topic in seen:
+                continue
+            seen.add(topic)
+            deduped.append(topic)
+        return sorted(deduped)
+
+    def camera_stream_topic(self) -> str:
+        return self._camera_stream_topic
+
+    def select_camera_stream_topic(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+
+        self.ensure_camera_stream_subscription(topic_name)
+        self._camera_stream_topic = topic_name
+        return {"ok": True, "topic": topic_name}
+
+    def latest_camera_frame(self) -> Optional[Dict[str, Any]]:
+        topic = self._camera_stream_topic
+        if not topic:
+            return None
+
+        with self._camera_stream_lock:
+            frame = self._camera_stream_frames.get(topic)
+            if frame is None:
+                return None
+            return {
+                "topic": topic,
+                "stamp_unix": float(frame.get("stamp_unix", 0.0)),
+                "format": frame.get("format", ""),
+                "data": frame.get("data", b""),
+            }
+
+    def camera_stream_status(self) -> Dict[str, Any]:
+        topic = self._camera_stream_topic
+        frame = self.latest_camera_frame()
+        age = None
+        if frame is not None:
+            age = max(0.0, time.time() - frame["stamp_unix"])
+
+        rates = self.topic_rates()
+        topic_rate_key = f"camera_stream:{topic}" if topic else ""
+
+        return {
+            "selected_topic": topic,
+            "available_topics": self.camera_stream_topics(),
+            "fps": rates.get(topic_rate_key, 0.0) if topic_rate_key else 0.0,
+            "age_sec": age,
+            "connected": frame is not None and age is not None and age < 2.0,
+            "format": frame.get("format") if frame else None,
+        }
 
     def _on_nav_feedback(self, feedback_msg: Any) -> None:
         with self._lock:
