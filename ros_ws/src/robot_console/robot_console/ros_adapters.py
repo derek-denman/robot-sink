@@ -1,16 +1,24 @@
+import contextlib
 import json
 import math
+import struct
 import threading
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CompressedImage, Image, LaserScan
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
+from sensor_msgs.msg import CompressedImage, Image, LaserScan, PointCloud2
 from std_msgs.msg import String
 from std_srvs.srv import Empty
 from tf2_msgs.msg import TFMessage
@@ -78,12 +86,27 @@ class RosAdapters:
         self._rate = defaultdict(RateTracker)
         self._last_topic_unix: Dict[str, float] = {}
         self._tf_frames: set[str] = set()
+        self._tf_graph: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(dict)
 
         self._scan_topic = topics.get("scan", "/scan")
         self._odom_topic = topics.get("odom", "/odom")
+        self._map_topic = topics.get("map", "/map")
+        self._map_frame = topics.get("map_frame", "map")
+        self._base_frame = topics.get("base_frame", "base_link")
         self._camera_topics = topics.get("camera_topics", []) or [topics.get("camera", "/oak/rgb/image_raw")]
         self._tf_topic = topics.get("tf", "/tf")
         self._tf_static_topic = topics.get("tf_static", "/tf_static")
+        configured_path_topics = topics.get("path_topics", [])
+        if not configured_path_topics:
+            configured_path_topics = [topics.get("path", "/plan"), "/plan", "/global_plan"]
+        self._path_topics = self._unique_topics(configured_path_topics)
+        self._selected_path_topic = topics.get("path_topic", "") or (
+            self._path_topics[0] if self._path_topics else ""
+        )
+
+        self._pointcloud_topic = str(topics.get("pointcloud", "")).strip()
+        self._pointcloud_max_points = int(config.get("streaming", {}).get("pointcloud_max_points", 4500))
+        self._scan_overlay_points = int(config.get("streaming", {}).get("scan_overlay_points", 520))
 
         self._scan_sub = node.create_subscription(
             LaserScan,
@@ -92,10 +115,29 @@ class RosAdapters:
             qos_profile_sensor_data,
         )
         self._odom_sub = node.create_subscription(Odometry, self._odom_topic, self._on_odom, 10)
+        self._map_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._map_sub = None
+        self._set_map_subscription(self._map_topic)
         self._tf_sub = node.create_subscription(TFMessage, self._tf_topic, self._on_tf, 30)
         self._tf_static_sub = node.create_subscription(
             TFMessage, self._tf_static_topic, self._on_tf_static, 30
         )
+
+        self._path_subs: Dict[str, Any] = {}
+        self._path_payloads: Dict[str, Dict[str, Any]] = {}
+        for topic in self._path_topics:
+            self.ensure_path_subscription(topic)
+
+        self._pointcloud_sub: Any = None
+        self._pointcloud_payload_lock = threading.Lock()
+        self._latest_pointcloud_payload: Optional[Dict[str, Any]] = None
+        if self._pointcloud_topic:
+            self.ensure_pointcloud_subscription(self._pointcloud_topic)
 
         self._camera_subs = []
         for topic in self._camera_topics:
@@ -165,6 +207,8 @@ class RosAdapters:
 
         self._scan_payload_lock = threading.Lock()
         self._latest_scan_payload: Optional[Dict[str, Any]] = None
+        self._map_payload_lock = threading.Lock()
+        self._latest_map_payload: Optional[Dict[str, Any]] = None
 
         self._bank_linear_scale = float(manual_cfg.get("bank_linear_scale", 0.8))
         self._bank_angular_scale = float(manual_cfg.get("bank_angular_scale", 1.7))
@@ -212,6 +256,82 @@ class RosAdapters:
             deduped.append(topic)
         return [topic for topic in deduped if RosAdapters._is_supported_mjpeg_topic(topic)]
 
+    def _discover_topics(self, ros_type: str) -> List[str]:
+        topics: List[str] = []
+        try:
+            for topic_name, type_names in self._node.get_topic_names_and_types():
+                if ros_type in type_names:
+                    topics.append(topic_name)
+        except Exception:
+            return []
+        return sorted(self._unique_topics(topics))
+
+    def _set_map_subscription(self, topic_name: str) -> None:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return
+        if self._map_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._map_sub)
+        self._map_topic = topic_name
+        self._map_sub = self._node.create_subscription(
+            OccupancyGrid,
+            topic_name,
+            self._on_map,
+            self._map_qos,
+        )
+
+    def _make_path_callback(self, topic_name: str) -> Callable[[Path], None]:
+        key = f"path:{topic_name}"
+
+        def _cb(msg: Path) -> None:
+            self._mark_topic("path")
+            self._mark_topic(key)
+            payload = self._build_path_payload(topic_name, msg)
+            with self._lock:
+                self._path_payloads[topic_name] = payload
+                if not self._selected_path_topic:
+                    self._selected_path_topic = topic_name
+
+        return _cb
+
+    def ensure_path_subscription(self, topic_name: str) -> None:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return
+        if topic_name in self._path_subs:
+            return
+        self._path_subs[topic_name] = self._node.create_subscription(
+            Path,
+            topic_name,
+            self._make_path_callback(topic_name),
+            10,
+        )
+        if topic_name not in self._path_topics:
+            self._path_topics.append(topic_name)
+
+    def ensure_pointcloud_subscription(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+
+        if self._pointcloud_sub is not None and self._pointcloud_topic == topic_name:
+            return {"ok": True, "topic": topic_name}
+
+        if self._pointcloud_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._pointcloud_sub)
+            self._pointcloud_sub = None
+
+        self._pointcloud_sub = self._node.create_subscription(
+            PointCloud2,
+            topic_name,
+            self._on_pointcloud,
+            qos_profile_sensor_data,
+        )
+        self._pointcloud_topic = topic_name
+        return {"ok": True, "topic": topic_name}
+
     def _mark_topic(self, key: str) -> None:
         self._rate[key].tick()
         self._last_topic_unix[key] = time.time()
@@ -244,6 +364,8 @@ class RosAdapters:
 
             angle += msg.angle_increment
 
+        map_points = self._scan_points_in_map(msg.header.frame_id, points, max_points=self._scan_overlay_points)
+
         return {
             "stamp_unix": time.time(),
             "frame_id": msg.header.frame_id,
@@ -251,6 +373,194 @@ class RosAdapters:
             "range_max": round(float(msg.range_max), 4),
             "point_count": len(points),
             "points": points,
+            "map_frame": self._map_frame,
+            "point_count_map": len(map_points),
+            "points_map": map_points,
+        }
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        self._mark_topic("map")
+        payload = self._build_map_payload(msg)
+        with self._map_payload_lock:
+            self._latest_map_payload = payload
+
+    def _on_pointcloud(self, msg: PointCloud2) -> None:
+        self._mark_topic("pointcloud")
+        if self._pointcloud_topic:
+            self._mark_topic(f"pointcloud:{self._pointcloud_topic}")
+        payload = self._build_pointcloud_payload(msg, self._pointcloud_topic or msg.header.frame_id)
+        with self._pointcloud_payload_lock:
+            self._latest_pointcloud_payload = payload
+
+    @staticmethod
+    def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        value = float(angle)
+        while value > math.pi:
+            value -= 2.0 * math.pi
+        while value < -math.pi:
+            value += 2.0 * math.pi
+        return value
+
+    @staticmethod
+    def _compose_transform(parent_to_mid: Dict[str, float], mid_to_child: Dict[str, float]) -> Dict[str, float]:
+        yaw = float(parent_to_mid.get("yaw", 0.0))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        x = float(parent_to_mid.get("x", 0.0)) + cos_yaw * float(mid_to_child.get("x", 0.0)) - sin_yaw * float(mid_to_child.get("y", 0.0))
+        y = float(parent_to_mid.get("y", 0.0)) + sin_yaw * float(mid_to_child.get("x", 0.0)) + cos_yaw * float(mid_to_child.get("y", 0.0))
+        return {
+            "x": x,
+            "y": y,
+            "yaw": RosAdapters._normalize_angle(yaw + float(mid_to_child.get("yaw", 0.0))),
+            "stamp_unix": min(
+                float(parent_to_mid.get("stamp_unix", time.time())),
+                float(mid_to_child.get("stamp_unix", time.time())),
+            ),
+        }
+
+    @staticmethod
+    def _invert_transform(transform: Dict[str, float]) -> Dict[str, float]:
+        yaw = float(transform.get("yaw", 0.0))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        tx = float(transform.get("x", 0.0))
+        ty = float(transform.get("y", 0.0))
+        inv_yaw = RosAdapters._normalize_angle(-yaw)
+        return {
+            "x": -(cos_yaw * tx + sin_yaw * ty),
+            "y": sin_yaw * tx - cos_yaw * ty,
+            "yaw": inv_yaw,
+            "stamp_unix": float(transform.get("stamp_unix", time.time())),
+        }
+
+    @staticmethod
+    def _map_cell_value(value: int) -> int:
+        cell = int(value)
+        if cell < 0:
+            return 255
+        return max(0, min(100, cell))
+
+    def _encode_map_rle(self, values: Sequence[int]) -> List[List[int]]:
+        if not values:
+            return []
+        out: List[List[int]] = []
+        run_val = self._map_cell_value(values[0])
+        run_count = 1
+        for raw in values[1:]:
+            value = self._map_cell_value(raw)
+            if value == run_val and run_count < 65535:
+                run_count += 1
+                continue
+            out.append([run_val, run_count])
+            run_val = value
+            run_count = 1
+        out.append([run_val, run_count])
+        return out
+
+    def _build_map_payload(self, msg: OccupancyGrid) -> Dict[str, Any]:
+        origin = msg.info.origin
+        yaw = self._quat_to_yaw(
+            float(origin.orientation.x),
+            float(origin.orientation.y),
+            float(origin.orientation.z),
+            float(origin.orientation.w),
+        )
+        rle = self._encode_map_rle(msg.data)
+        return {
+            "stamp_unix": time.time(),
+            "frame_id": msg.header.frame_id or self._map_frame,
+            "width": int(msg.info.width),
+            "height": int(msg.info.height),
+            "resolution": float(msg.info.resolution),
+            "origin": {
+                "x": float(origin.position.x),
+                "y": float(origin.position.y),
+                "yaw": yaw,
+            },
+            "encoding": "rle_u8",
+            "cell_count": len(msg.data),
+            "data_rle": rle,
+        }
+
+    def _build_path_payload(self, topic_name: str, msg: Path, max_points: int = 1200) -> Dict[str, Any]:
+        points: List[List[float]] = []
+        total = len(msg.poses)
+        step = max(1, total // max(1, max_points))
+        for idx, pose_stamped in enumerate(msg.poses):
+            if idx % step != 0:
+                continue
+            pose = pose_stamped.pose
+            points.append([round(float(pose.position.x), 4), round(float(pose.position.y), 4)])
+            if len(points) >= max_points:
+                break
+
+        return {
+            "stamp_unix": time.time(),
+            "topic": topic_name,
+            "frame_id": msg.header.frame_id or self._map_frame,
+            "point_count": len(points),
+            "points": points,
+        }
+
+    def _build_pointcloud_payload(self, msg: PointCloud2, topic_name: str) -> Dict[str, Any]:
+        total = int(msg.width) * int(msg.height)
+        if total <= 0 or not msg.data:
+            return {
+                "stamp_unix": time.time(),
+                "topic": topic_name,
+                "frame_id": msg.header.frame_id,
+                "point_count": 0,
+                "points": [],
+            }
+
+        fields = {field.name: field for field in msg.fields}
+        field_x = fields.get("x")
+        field_y = fields.get("y")
+        field_z = fields.get("z")
+        if field_x is None or field_y is None or field_z is None:
+            return {
+                "stamp_unix": time.time(),
+                "topic": topic_name,
+                "frame_id": msg.header.frame_id,
+                "point_count": 0,
+                "points": [],
+                "error": "missing_xyz_fields",
+            }
+
+        endian = ">" if msg.is_bigendian else "<"
+        unpack_f = f"{endian}f"
+        max_offset = max(int(field_x.offset), int(field_y.offset), int(field_z.offset))
+        point_step = int(msg.point_step)
+        data = bytes(msg.data)
+        sample_step = max(1, total // max(1, self._pointcloud_max_points))
+
+        points: List[List[float]] = []
+        for idx in range(0, total, sample_step):
+            base = idx * point_step
+            if base + max_offset + 4 > len(data):
+                break
+            x = struct.unpack_from(unpack_f, data, base + int(field_x.offset))[0]
+            y = struct.unpack_from(unpack_f, data, base + int(field_y.offset))[0]
+            z = struct.unpack_from(unpack_f, data, base + int(field_z.offset))[0]
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                continue
+            points.append([round(float(x), 4), round(float(y), 4), round(float(z), 4)])
+            if len(points) >= self._pointcloud_max_points:
+                break
+
+        return {
+            "stamp_unix": time.time(),
+            "topic": topic_name,
+            "frame_id": msg.header.frame_id,
+            "point_count": len(points),
+            "points": points,
+            "source_points": total,
         }
 
     def _on_odom(self, _msg: Odometry) -> None:
@@ -315,9 +625,107 @@ class RosAdapters:
                     self._tf_frames.add(parent)
                 if child:
                     self._tf_frames.add(child)
+                if not parent or not child:
+                    continue
+
+                trans = transform.transform.translation
+                rot = transform.transform.rotation
+                stamp_msg = transform.header.stamp
+                stamp_unix = float(stamp_msg.sec) + float(getattr(stamp_msg, "nanosec", 0)) / 1e9
+                if stamp_unix <= 0.0:
+                    stamp_unix = time.time()
+
+                edge = {
+                    "x": float(trans.x),
+                    "y": float(trans.y),
+                    "yaw": self._quat_to_yaw(float(rot.x), float(rot.y), float(rot.z), float(rot.w)),
+                    "stamp_unix": stamp_unix,
+                }
+                self._tf_graph[parent][child] = edge
+                self._tf_graph[child][parent] = self._invert_transform(edge)
+
+    def lookup_transform(
+        self,
+        parent_frame: str,
+        child_frame: str,
+        max_depth: int = 12,
+    ) -> Optional[Dict[str, float]]:
+        parent_frame = (parent_frame or "").strip("/")
+        child_frame = (child_frame or "").strip("/")
+        if not parent_frame or not child_frame:
+            return None
+        if parent_frame == child_frame:
+            return {"x": 0.0, "y": 0.0, "yaw": 0.0, "stamp_unix": time.time()}
+
+        with self._lock:
+            graph = {src: dict(edges) for src, edges in self._tf_graph.items()}
+
+        visited = {parent_frame}
+        queue: deque[tuple[str, Dict[str, float], int]] = deque(
+            [(parent_frame, {"x": 0.0, "y": 0.0, "yaw": 0.0, "stamp_unix": time.time()}, 0)]
+        )
+        while queue:
+            frame, accum, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+            for next_frame, edge in graph.get(frame, {}).items():
+                if next_frame in visited:
+                    continue
+                next_tf = self._compose_transform(accum, edge)
+                if next_frame == child_frame:
+                    return next_tf
+                visited.add(next_frame)
+                queue.append((next_frame, next_tf, depth + 1))
+
+        return None
+
+    def _scan_points_in_map(
+        self,
+        scan_frame: str,
+        points: Sequence[Sequence[float]],
+        max_points: int = 500,
+    ) -> List[List[float]]:
+        tf = self.lookup_transform(self._map_frame, scan_frame)
+        if tf is None:
+            return []
+
+        step = max(1, len(points) // max(1, max_points))
+        yaw = float(tf.get("yaw", 0.0))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        tx = float(tf.get("x", 0.0))
+        ty = float(tf.get("y", 0.0))
+
+        mapped: List[List[float]] = []
+        for idx, point in enumerate(points):
+            if idx % step != 0:
+                continue
+            if len(point) < 2:
+                continue
+            sx = float(point[0])
+            sy = float(point[1])
+            mx = tx + cos_yaw * sx - sin_yaw * sy
+            my = ty + sin_yaw * sx + cos_yaw * sy
+            mapped.append([round(mx, 4), round(my, 4)])
+            if len(mapped) >= max_points:
+                break
+        return mapped
+
+    def robot_pose_in_map(self) -> Optional[Dict[str, float]]:
+        tf = self.lookup_transform(self._map_frame, self._base_frame)
+        if tf is None:
+            return None
+        return {
+            "x": round(float(tf.get("x", 0.0)), 4),
+            "y": round(float(tf.get("y", 0.0)), 4),
+            "yaw": round(float(tf.get("yaw", 0.0)), 4),
+            "stamp_unix": float(tf.get("stamp_unix", time.time())),
+            "frame_id": self._map_frame,
+            "base_frame": self._base_frame,
+        }
 
     def topic_rates(self) -> Dict[str, float]:
-        keys = ["scan", "odom", "camera", "camera_stream", "tf", "tf_static"]
+        keys = ["scan", "odom", "camera", "camera_stream", "tf", "tf_static", "map", "path", "pointcloud"]
         rates = {key: self._rate[key].hz() for key in keys}
         for topic in self._camera_topics:
             key = f"camera:{topic}"
@@ -325,6 +733,14 @@ class RosAdapters:
 
         for topic in self.camera_stream_topics():
             key = f"camera_stream:{topic}"
+            rates[key] = self._rate[key].hz()
+
+        for topic in self.path_topics():
+            key = f"path:{topic}"
+            rates[key] = self._rate[key].hz()
+
+        for topic in self.pointcloud_topics():
+            key = f"pointcloud:{topic}"
             rates[key] = self._rate[key].hz()
 
         return rates
@@ -527,6 +943,148 @@ class RosAdapters:
                 "active": self._nav_goal_handle is not None,
             }
 
+    def latest_map_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._map_payload_lock:
+            if self._latest_map_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_map_payload))
+
+    def latest_pointcloud_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._pointcloud_payload_lock:
+            if self._latest_pointcloud_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_pointcloud_payload))
+
+    def path_topics(self) -> List[str]:
+        discovered = self._discover_topics("nav_msgs/msg/Path")
+        for topic in discovered:
+            self.ensure_path_subscription(topic)
+
+        combined = list(self._path_subs.keys()) + self._path_topics + discovered
+        return sorted(self._unique_topics(combined))
+
+    def selected_path_payload(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            topic = self._selected_path_topic
+            payload = self._path_payloads.get(topic)
+            if payload is not None:
+                return json.loads(json.dumps(payload))
+
+            if not self._path_payloads:
+                return None
+            # Fallback to latest path payload.
+            latest = max(
+                self._path_payloads.values(),
+                key=lambda item: float(item.get("stamp_unix", 0.0)),
+            )
+            return json.loads(json.dumps(latest))
+
+    def select_path_topic(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        self.ensure_path_subscription(topic_name)
+        with self._lock:
+            self._selected_path_topic = topic_name
+        return {"ok": True, "topic": topic_name}
+
+    def map_topics(self) -> Dict[str, Any]:
+        map_topics = self._discover_topics("nav_msgs/msg/OccupancyGrid")
+        scan_topics = self._discover_topics("sensor_msgs/msg/LaserScan")
+        path_topics = self.path_topics()
+        return {
+            "selected": {
+                "map_topic": self._map_topic,
+                "scan_topic": self._scan_topic,
+                "path_topic": self._selected_path_topic,
+                "map_frame": self._map_frame,
+                "base_frame": self._base_frame,
+            },
+            "available": {
+                "map_topics": map_topics,
+                "scan_topics": scan_topics,
+                "path_topics": path_topics,
+            },
+        }
+
+    def configure_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        changed: Dict[str, Any] = {}
+
+        map_topic = str(payload.get("map_topic", "")).strip()
+        if map_topic and map_topic != self._map_topic:
+            self._set_map_subscription(map_topic)
+            changed["map_topic"] = map_topic
+
+        path_topic = str(payload.get("path_topic", "")).strip()
+        if path_topic:
+            result = self.select_path_topic(path_topic)
+            if not result.get("ok", False):
+                return result
+            changed["path_topic"] = path_topic
+
+        map_frame = str(payload.get("map_frame", "")).strip().strip("/")
+        if map_frame:
+            self._map_frame = map_frame
+            changed["map_frame"] = map_frame
+
+        base_frame = str(payload.get("base_frame", "")).strip().strip("/")
+        if base_frame:
+            self._base_frame = base_frame
+            changed["base_frame"] = base_frame
+
+        return {
+            "ok": True,
+            "changed": changed,
+            "topics": self.map_topics(),
+            "status": self.map_stream_status(),
+        }
+
+    def map_overlay_snapshot(self) -> Dict[str, Any]:
+        scan = self.latest_scan_snapshot() or {}
+        pose = self.robot_pose_in_map()
+        path = self.selected_path_payload()
+        return {
+            "stamp_unix": time.time(),
+            "map_frame": self._map_frame,
+            "scan_topic": self._scan_topic,
+            "scan_points": scan.get("points_map", []),
+            "scan_point_count": scan.get("point_count_map", 0),
+            "scan_age_sec": self.topic_age_sec("scan"),
+            "robot_pose": pose,
+            "path_topic": path.get("topic") if path else self._selected_path_topic,
+            "path_points": path.get("points", []) if path else [],
+            "path_point_count": path.get("point_count", 0) if path else 0,
+            "tf_age_sec": self.topic_age_sec("tf"),
+        }
+
+    def map_stream_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        age = self.topic_age_sec("map")
+        payload = self.latest_map_snapshot()
+        pose = self.robot_pose_in_map()
+        available_map_topics = self._discover_topics("nav_msgs/msg/OccupancyGrid")
+        available_path_topics = self.path_topics()
+        return {
+            "topic": self._map_topic,
+            "fps": rates.get("map", 0.0),
+            "age_sec": age,
+            "connected": age is not None and age < 5.0,
+            "map_available": payload is not None,
+            "frame_id": (payload or {}).get("frame_id", self._map_frame),
+            "width": (payload or {}).get("width", 0),
+            "height": (payload or {}).get("height", 0),
+            "resolution": (payload or {}).get("resolution", 0.0),
+            "tf_age_sec": self.topic_age_sec("tf"),
+            "scan_rate_hz": rates.get("scan", 0.0),
+            "pose": pose,
+            "selected_path_topic": self._selected_path_topic,
+            "available_map_topics": available_map_topics,
+            "available_path_topics": available_path_topics,
+            "path_rate_hz": rates.get(f"path:{self._selected_path_topic}", 0.0)
+            if self._selected_path_topic
+            else 0.0,
+        }
+
     def latest_scan_snapshot(self) -> Optional[Dict[str, Any]]:
         with self._scan_payload_lock:
             if self._latest_scan_payload is None:
@@ -543,6 +1101,38 @@ class RosAdapters:
             "age_sec": scan_age,
             "point_count": (payload or {}).get("point_count", 0),
             "connected": scan_age is not None and scan_age < 2.0,
+        }
+
+    def pointcloud_topics(self) -> List[str]:
+        discovered = self._discover_topics("sensor_msgs/msg/PointCloud2")
+        combined = self._unique_topics(discovered + [self._pointcloud_topic])
+        return sorted([topic for topic in combined if topic])
+
+    def select_pointcloud_topic(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        return self.ensure_pointcloud_subscription(topic_name)
+
+    def pointcloud_stream_status(self) -> Dict[str, Any]:
+        topics = self.pointcloud_topics()
+        payload = self.latest_pointcloud_snapshot()
+        selected = self._pointcloud_topic
+        if not selected and topics:
+            selected = topics[0]
+            self.ensure_pointcloud_subscription(selected)
+
+        topic_key = f"pointcloud:{selected}" if selected else "pointcloud"
+        rates = self.topic_rates()
+        age = self.topic_age_sec("pointcloud")
+        return {
+            "selected_topic": selected,
+            "available_topics": topics,
+            "fps": rates.get(topic_key, rates.get("pointcloud", 0.0)),
+            "age_sec": age,
+            "connected": age is not None and age < 2.5,
+            "frame_id": (payload or {}).get("frame_id"),
+            "point_count": (payload or {}).get("point_count", 0),
         }
 
     def camera_stream_topics(self) -> List[str]:
