@@ -115,10 +115,21 @@ ros_pkg_exists() {
   command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix "${pkg}" >/dev/null 2>&1
 }
 
+port_is_listening() {
+  local host="$1"
+  local port="$2"
+  command -v nc >/dev/null 2>&1 && nc -z "${host}" "${port}" >/dev/null 2>&1
+}
+
 if [[ -n "${FOXGLOVE_CMD:-}" ]]; then
   start_cmd "foxglove" "${FOXGLOVE_CMD}"
 elif ros_pkg_exists foxglove_bridge; then
-  start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${FOXGLOVE_PORT}"; then
+    log "Port ${FOXGLOVE_PORT} already in use; assuming foxglove bridge is already running"
+    start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove port ${FOXGLOVE_PORT} already in use; using existing bridge'"
+  else
+    start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+  fi
 else
   start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove_bridge not found; bridge unavailable'"
 fi
@@ -126,9 +137,19 @@ fi
 if [[ -n "${ROBOT_CONSOLE_CMD:-}" ]]; then
   start_cmd "robot-console" "${ROBOT_CONSOLE_CMD}"
 elif ros_pkg_exists robot_console; then
-  start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${ROBOT_CONSOLE_PORT:-8080}"; then
+    log "Port ${ROBOT_CONSOLE_PORT:-8080} already in use; assuming robot console backend is already running"
+    start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot console port ${ROBOT_CONSOLE_PORT:-8080} already in use; using existing backend'"
+  else
+    start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+  fi
 elif [[ -d "${ROBOT_ROOT}/ros_ws/src/robot_console/robot_console" ]]; then
-  start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${ROBOT_CONSOLE_PORT:-8080}"; then
+    log "Port ${ROBOT_CONSOLE_PORT:-8080} already in use; assuming robot console backend is already running"
+    start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot console port ${ROBOT_CONSOLE_PORT:-8080} already in use; using existing backend'"
+  else
+    start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
+  fi
 else
   start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot_console package missing; build ros_ws first'"
 fi
