@@ -22,30 +22,48 @@ body {
 }
 
 .hmi-header {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 10px 16px;
+  min-height: 76px;
+  height: auto !important;
+  line-height: normal !important;
   background: linear-gradient(90deg, rgba(15, 22, 31, 0.98), rgba(21, 30, 41, 0.96));
   border-bottom: 1px solid rgba(128, 158, 187, 0.2);
 }
 
 .hmi-header-left {
-  min-width: 0;
+  min-width: 240px;
+  flex: 1 1 300px;
+}
+
+.hmi-header-left .ant-space {
+  flex-wrap: wrap;
 }
 
 .hmi-header-center {
-  justify-self: center;
+  min-width: 240px;
+  flex: 0 1 auto;
 }
 
 .hmi-header-right {
-  justify-self: end;
+  min-width: 240px;
+  margin-left: auto;
+  flex: 0 1 auto;
+}
+
+.hmi-header-right .ant-space {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .hmi-content {
   padding: 16px;
   overflow-y: auto;
+  min-width: 0;
 }
 
 .hmi-card {
@@ -134,15 +152,18 @@ body {
 
 @media (max-width: 1200px) {
   .hmi-header {
-    grid-template-columns: 1fr;
-    height: auto;
     padding: 10px 12px;
   }
 
   .hmi-header-left,
   .hmi-header-center,
   .hmi-header-right {
-    justify-self: start;
+    margin-left: 0;
     width: 100%;
+    min-width: 0;
+  }
+
+  .hmi-header-right .ant-space {
+    justify-content: flex-start;
   }
 }
