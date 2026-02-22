@@ -76,6 +76,15 @@ start_cmd() {
   CMDS+=("${cmd}")
 }
 
+retry_loop_cmd() {
+  local name="$1"
+  local inner_cmd="$2"
+  local retry_delay="${3:-3}"
+
+  printf 'while true; do %s; rc=$?; echo "[%s] %s exited rc=${rc}; retrying in %ss"; sleep %s; done' \
+    "${inner_cmd}" "${SCRIPT_NAME}" "${name}" "${retry_delay}" "${retry_delay}"
+}
+
 cleanup() {
   log "Stopping stack processes"
   local pid
@@ -127,7 +136,7 @@ fi
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
 elif ros_pkg_exists depthai_ros_driver; then
-  start_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py"
+  start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
 else
   start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver not found; running stub'"
 fi
@@ -135,7 +144,7 @@ fi
 if [[ -n "${RPLIDAR_LAUNCH_CMD:-}" ]]; then
   start_cmd "rplidar" "${RPLIDAR_LAUNCH_CMD}"
 elif ros_pkg_exists rplidar_ros; then
-  start_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser"
+  start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
 else
   start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --check-device /dev/ttyRPLIDAR --hint 'rplidar_ros not found; running stub'"
 fi
