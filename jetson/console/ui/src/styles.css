@@ -22,22 +22,22 @@ body {
 }
 
 .hmi-header {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 10px 14px;
   padding: 10px 16px;
-  min-height: 76px;
+  min-height: 72px;
   height: auto !important;
   line-height: normal !important;
   background: linear-gradient(90deg, rgba(15, 22, 31, 0.98), rgba(21, 30, 41, 0.96));
   border-bottom: 1px solid rgba(128, 158, 187, 0.2);
+  position: relative;
+  z-index: 5;
 }
 
 .hmi-header-left {
-  min-width: 240px;
-  flex: 1 1 300px;
+  min-width: 0;
 }
 
 .hmi-header-left .ant-space {
@@ -45,14 +45,12 @@ body {
 }
 
 .hmi-header-center {
-  min-width: 240px;
-  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .hmi-header-right {
-  min-width: 240px;
-  margin-left: auto;
-  flex: 0 1 auto;
+  min-width: 0;
+  justify-self: end;
 }
 
 .hmi-header-right .ant-space {
@@ -100,10 +98,20 @@ body {
 
 .camera-frame img {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
   min-height: 280px;
   object-fit: cover;
+}
+
+.map-canvas,
+.pointcloud-canvas {
+  width: 100%;
+  display: block;
+  border-radius: 10px;
+  border: 1px solid rgba(130, 162, 192, 0.2);
+  background: #08111a;
+  touch-action: none;
 }
 
 .drive-grid {
@@ -152,15 +160,16 @@ body {
 
 @media (max-width: 1200px) {
   .hmi-header {
+    grid-template-columns: 1fr;
     padding: 10px 12px;
   }
 
   .hmi-header-left,
   .hmi-header-center,
   .hmi-header-right {
-    margin-left: 0;
     width: 100%;
     min-width: 0;
+    justify-self: stretch;
   }
 
   .hmi-header-right .ant-space {

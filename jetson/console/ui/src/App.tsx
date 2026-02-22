@@ -37,11 +37,22 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LidarCanvas } from "./components/LidarCanvas";
+import { MapCanvas } from "./components/MapCanvas";
+import { PointCloudCanvas } from "./components/PointCloudCanvas";
 import { getStatus, postApi } from "./lib/api";
 import { agoUnix, bytes, hz, secAge, timestampToLocal } from "./lib/format";
 import { getCachedCameraTopic, getCachedMode, useConsoleStore } from "./store/useConsoleStore";
-import type { ArmJointConfig, LogSource, RobotMode, ScanPayload, StatusPayload, WsEvent } from "./types";
+import type {
+  ArmJointConfig,
+  LogSource,
+  MapOverlayPayload,
+  MapPayload,
+  PointcloudPayload,
+  RobotMode,
+  ScanPayload,
+  StatusPayload,
+  WsEvent,
+} from "./types";
 
 const { Header, Content, Sider } = Layout;
 const { Title, Text } = Typography;
@@ -101,6 +112,9 @@ export default function App(): JSX.Element {
     setWsStateLabel,
     setStatus,
     setScanPayload,
+    setMapPayload,
+    setMapOverlay,
+    setPointcloudPayload,
     setSelectedMode,
     setSelectedCameraTopic,
     setModeReconciled,
@@ -113,6 +127,9 @@ export default function App(): JSX.Element {
   const [modeDirty, setModeDirty] = useState(false);
   const [cameraDraft, setCameraDraft] = useState<string>(robot.selectedCameraTopic);
   const [cameraReconciled, setCameraReconciled] = useState(false);
+  const [mapTopicDraft, setMapTopicDraft] = useState("");
+  const [pathTopicDraft, setPathTopicDraft] = useState("");
+  const [pointcloudDraft, setPointcloudDraft] = useState("");
   const [driveSpeed, setDriveSpeed] = useState(0.32);
   const [motionDeadlineMs, setMotionDeadlineMs] = useState(0);
   const [deadmanCountdown, setDeadmanCountdown] = useState(0);
@@ -141,10 +158,16 @@ export default function App(): JSX.Element {
   const capabilities = status?.capabilities || {};
   const logSources: LogSource[] = status?.logs?.sources || [];
   const cameraTopics = status?.visualizer?.camera?.available_topics || [];
+  const mapTopic = status?.visualizer?.map?.topic || "";
+  const pathTopic = status?.visualizer?.map?.selected_path_topic || "";
+  const pointcloudTopics = status?.visualizer?.pointcloud?.available_topics || [];
   const armJoints = (status?.arm?.joints || []) as ArmJointConfig[];
   const namedPoses = status?.arm?.named_poses || [];
 
   const motionActive = motionDeadlineMs > Date.now();
+  const mapPayload = robot.mapPayload;
+  const mapOverlay = robot.mapOverlay;
+  const pointcloudPayload = robot.pointcloudPayload;
 
   const refreshStatus = useCallback(async () => {
     const next = await getStatus();
@@ -179,6 +202,18 @@ export default function App(): JSX.Element {
         }
         if (payload.type === "scan") {
           setScanPayload(payload.data as ScanPayload);
+          return;
+        }
+        if (payload.type === "map") {
+          setMapPayload(payload.data as MapPayload);
+          return;
+        }
+        if (payload.type === "map_overlay") {
+          setMapOverlay(payload.data as MapOverlayPayload);
+          return;
+        }
+        if (payload.type === "pointcloud") {
+          setPointcloudPayload(payload.data as PointcloudPayload);
         }
       } catch {
         // ignore malformed payloads
@@ -199,7 +234,17 @@ export default function App(): JSX.Element {
       setWsStateLabel("error");
       ws.close();
     };
-  }, [setCameraReconciled, setModeReconciled, setScanPayload, setStatus, setWsConnected, setWsStateLabel]);
+  }, [
+    setCameraReconciled,
+    setMapOverlay,
+    setMapPayload,
+    setModeReconciled,
+    setPointcloudPayload,
+    setScanPayload,
+    setStatus,
+    setWsConnected,
+    setWsStateLabel,
+  ]);
 
   useEffect(() => {
     refreshStatus().catch((err) => messageApi.error(err.message));
@@ -233,6 +278,24 @@ export default function App(): JSX.Element {
       setCameraDraft(robot.selectedCameraTopic);
     }
   }, [cameraDraft, robot.selectedCameraTopic]);
+
+  useEffect(() => {
+    if (!mapTopicDraft && mapTopic) {
+      setMapTopicDraft(mapTopic);
+    }
+  }, [mapTopic, mapTopicDraft]);
+
+  useEffect(() => {
+    if (!pathTopicDraft && pathTopic) {
+      setPathTopicDraft(pathTopic);
+    }
+  }, [pathTopic, pathTopicDraft]);
+
+  useEffect(() => {
+    if (!pointcloudDraft && status?.visualizer?.pointcloud?.selected_topic) {
+      setPointcloudDraft(status.visualizer.pointcloud.selected_topic);
+    }
+  }, [pointcloudDraft, status?.visualizer?.pointcloud?.selected_topic]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -471,6 +534,22 @@ export default function App(): JSX.Element {
     await refreshStatus();
   }, [cameraDraft, refreshStatus, setSelectedCameraTopic]);
 
+  const applyMapConfig = useCallback(async () => {
+    await postApi("/api/map/config", {
+      map_topic: mapTopicDraft || undefined,
+      path_topic: pathTopicDraft || undefined,
+    });
+    await refreshStatus();
+  }, [mapTopicDraft, pathTopicDraft, refreshStatus]);
+
+  const applyPointcloudTopic = useCallback(async () => {
+    if (!pointcloudDraft) {
+      return;
+    }
+    await postApi("/api/pointcloud/select", { topic: pointcloudDraft });
+    await refreshStatus();
+  }, [pointcloudDraft, refreshStatus]);
+
   const sendMotorBank = useCallback(async () => {
     await sendBase({ type: "motor_bank", left: leftBank, right: rightBank });
   }, [leftBank, rightBank, sendBase]);
@@ -618,60 +697,168 @@ export default function App(): JSX.Element {
     </Space>
   );
 
-  const renderVisualizer = (): JSX.Element => (
-    <Row gutter={[16, 16]}>
-      <Col xs={24} xl={14}>
-        <Card
-          className="hmi-card"
-          title="Lidar Stream"
-          extra={
-            <Space>
-              <Badge status={status?.visualizer?.scan?.connected ? "success" : "error"} text={status?.visualizer?.scan?.connected ? "Live" : "Disconnected"} />
-              <Text type="secondary">{hz(status?.visualizer?.scan?.fps)}</Text>
-              <Text type="secondary">age {secAge(status?.visualizer?.scan?.age_sec)}</Text>
-            </Space>
-          }
-        >
-          <LidarCanvas scan={robot.scanPayload} />
-        </Card>
-      </Col>
-      <Col xs={24} xl={10}>
-        <Card
-          className="hmi-card"
-          title="OAK-D RGB"
-          extra={
-            <Space>
-              <Badge status={status?.visualizer?.camera?.connected ? "success" : "error"} text={status?.visualizer?.camera?.connected ? "Live" : "Disconnected"} />
-              <Text type="secondary">{hz(status?.visualizer?.camera?.fps)}</Text>
-            </Space>
-          }
-        >
-          <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
-            <Select
-              style={{ width: "100%" }}
-              value={cameraDraft || undefined}
-              placeholder="Select camera topic"
-              options={cameraTopics.map((topic) => ({ value: topic, label: topic }))}
-              onChange={(value) => setCameraDraft(value)}
-            />
-            <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>Apply</Button>
-          </Space.Compact>
-          <div className="camera-frame">
-            <img src={`/stream/camera.mjpeg?topic=${encodeURIComponent(cameraDraft || robot.selectedCameraTopic || "")}`} alt="camera" />
-          </div>
-          <div style={{ marginTop: 8 }}>
-            <Text type="secondary">Topic: {cameraDraft || robot.selectedCameraTopic || "n/a"}</Text>
-            <br />
-            <Text type="secondary">Age: {secAge(status?.visualizer?.camera?.age_sec)}</Text>
-          </div>
-          <Divider />
-          <Button icon={<CameraOutlined />} href={`https://studio.foxglove.dev/?ds=foxglove-websocket&ds.url=${encodeURIComponent(`ws://${window.location.hostname}:8765`)}`} target="_blank">
-            Open Foxglove (ws://{window.location.hostname}:8765)
-          </Button>
-        </Card>
-      </Col>
-    </Row>
-  );
+  const renderVisualizer = (): JSX.Element => {
+    const mapTopicOptions = status?.visualizer?.map?.available_map_topics || [];
+    const pathTopicOptions = status?.visualizer?.map?.available_path_topics || [];
+    const pose = mapOverlay?.robot_pose || status?.visualizer?.map?.pose;
+
+    return (
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xxl={14}>
+          <Card
+            className="hmi-card"
+            title="Waymo-Style 2D Mapping View"
+            extra={
+              <Space>
+                <Badge
+                  status={status?.visualizer?.map?.connected ? "success" : "error"}
+                  text={status?.visualizer?.map?.connected ? "/map Live" : "/map Waiting"}
+                />
+                <Text type="secondary">scan {hz(status?.visualizer?.scan?.fps)}</Text>
+                <Text type="secondary">tf age {secAge(status?.visualizer?.map?.tf_age_sec)}</Text>
+              </Space>
+            }
+          >
+            <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
+              <Select
+                style={{ width: "45%" }}
+                value={mapTopicDraft || undefined}
+                placeholder="Map topic"
+                options={mapTopicOptions.map((topic) => ({ value: topic, label: topic }))}
+                onChange={(value) => setMapTopicDraft(value)}
+              />
+              <Select
+                style={{ width: "45%" }}
+                value={pathTopicDraft || undefined}
+                placeholder="Path topic"
+                options={pathTopicOptions.map((topic) => ({ value: topic, label: topic }))}
+                onChange={(value) => setPathTopicDraft(value)}
+              />
+              <Button onClick={() => runAction("Map config applied", applyMapConfig)}>Apply</Button>
+            </Space.Compact>
+            <MapCanvas map={mapPayload} overlay={mapOverlay} />
+            <Row gutter={[12, 8]} style={{ marginTop: 10 }}>
+              <Col xs={24} md={12}>
+                <Text type="secondary">
+                  Pose:{" "}
+                  {pose
+                    ? `${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, yaw ${pose.yaw.toFixed(2)}`
+                    : "n/a"}
+                </Text>
+              </Col>
+              <Col xs={24} md={12}>
+                <Text type="secondary">
+                  Path: {pathTopicDraft || pathTopic || "n/a"} ({mapOverlay?.path_point_count || 0} pts)
+                </Text>
+              </Col>
+              <Col xs={24} md={12}>
+                <Text type="secondary">
+                  Map: {mapPayload?.width || 0}x{mapPayload?.height || 0} @{" "}
+                  {(mapPayload?.resolution || 0).toFixed(3)} m/px
+                </Text>
+              </Col>
+              <Col xs={24} md={12}>
+                <Text type="secondary">
+                  Scan overlay: {mapOverlay?.scan_point_count || 0} pts, age{" "}
+                  {secAge(mapOverlay?.scan_age_sec)}
+                </Text>
+              </Col>
+            </Row>
+          </Card>
+        </Col>
+
+        <Col xs={24} xxl={10}>
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Card
+              className="hmi-card"
+              title="Live 3D Point Cloud"
+              extra={
+                <Space>
+                  <Badge
+                    status={status?.visualizer?.pointcloud?.connected ? "success" : "error"}
+                    text={status?.visualizer?.pointcloud?.connected ? "Live" : "Waiting"}
+                  />
+                  <Text type="secondary">{hz(status?.visualizer?.pointcloud?.fps)}</Text>
+                </Space>
+              }
+            >
+              <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
+                <Select
+                  style={{ width: "100%" }}
+                  value={pointcloudDraft || undefined}
+                  placeholder="PointCloud2 topic"
+                  options={pointcloudTopics.map((topic) => ({ value: topic, label: topic }))}
+                  onChange={(value) => setPointcloudDraft(value)}
+                />
+                <Button onClick={() => runAction("Pointcloud topic selected", applyPointcloudTopic)}>
+                  Apply
+                </Button>
+              </Space.Compact>
+              <PointCloudCanvas cloud={pointcloudPayload} />
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary">
+                  Topic: {pointcloudDraft || status?.visualizer?.pointcloud?.selected_topic || "n/a"}
+                </Text>
+                <br />
+                <Text type="secondary">
+                  Age: {secAge(status?.visualizer?.pointcloud?.age_sec)} | Points:{" "}
+                  {pointcloudPayload?.point_count || 0}
+                </Text>
+              </div>
+            </Card>
+
+            <Card
+              className="hmi-card"
+              title="OAK-D RGB"
+              extra={
+                <Space>
+                  <Badge
+                    status={status?.visualizer?.camera?.connected ? "success" : "error"}
+                    text={status?.visualizer?.camera?.connected ? "Live" : "Disconnected"}
+                  />
+                  <Text type="secondary">{hz(status?.visualizer?.camera?.fps)}</Text>
+                </Space>
+              }
+            >
+              <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
+                <Select
+                  style={{ width: "100%" }}
+                  value={cameraDraft || undefined}
+                  placeholder="Select camera topic"
+                  options={cameraTopics.map((topic) => ({ value: topic, label: topic }))}
+                  onChange={(value) => setCameraDraft(value)}
+                />
+                <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>Apply</Button>
+              </Space.Compact>
+              <div className="camera-frame">
+                <img
+                  src={`/stream/camera.mjpeg?topic=${encodeURIComponent(
+                    cameraDraft || robot.selectedCameraTopic || "",
+                  )}`}
+                  alt="camera"
+                />
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary">Topic: {cameraDraft || robot.selectedCameraTopic || "n/a"}</Text>
+                <br />
+                <Text type="secondary">Age: {secAge(status?.visualizer?.camera?.age_sec)}</Text>
+              </div>
+              <Divider />
+              <Button
+                icon={<CameraOutlined />}
+                href={`https://studio.foxglove.dev/?ds=foxglove-websocket&ds.url=${encodeURIComponent(
+                  `ws://${window.location.hostname}:8765`,
+                )}`}
+                target="_blank"
+              >
+                Open Foxglove (ws://{window.location.hostname}:8765)
+              </Button>
+            </Card>
+          </Space>
+        </Col>
+      </Row>
+    );
+  };
 
   const renderManual = (): JSX.Element => (
     <Row gutter={[16, 16]}>
@@ -1040,8 +1227,12 @@ export default function App(): JSX.Element {
                   <Row gutter={[8, 8]}>
                     <Col span={12}><Statistic title="Lidar" value={status?.visualizer?.scan?.fps || 0} precision={1} suffix="Hz" /></Col>
                     <Col span={12}><Statistic title="Camera" value={status?.visualizer?.camera?.fps || 0} precision={1} suffix="Hz" /></Col>
+                    <Col span={12}><Statistic title="Map" value={status?.visualizer?.map?.fps || 0} precision={1} suffix="Hz" /></Col>
+                    <Col span={12}><Statistic title="PointCloud" value={status?.visualizer?.pointcloud?.fps || 0} precision={1} suffix="Hz" /></Col>
                     <Col span={12}><Text type="secondary">scan age {secAge(status?.visualizer?.scan?.age_sec)}</Text></Col>
                     <Col span={12}><Text type="secondary">cam age {secAge(status?.visualizer?.camera?.age_sec)}</Text></Col>
+                    <Col span={12}><Text type="secondary">map age {secAge(status?.visualizer?.map?.age_sec)}</Text></Col>
+                    <Col span={12}><Text type="secondary">cloud age {secAge(status?.visualizer?.pointcloud?.age_sec)}</Text></Col>
                   </Row>
                 </Card>
 
