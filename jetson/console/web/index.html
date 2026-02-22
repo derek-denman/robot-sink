@@ -10,25 +10,38 @@
   <header class="topbar">
     <div class="brand">
       <h1>Robot Console</h1>
-      <p>Jetson-hosted control, diagnostics, and mission workflow UI</p>
+      <p>Jetson-hosted control, diagnostics, and workflow runtime</p>
     </div>
-    <div class="mode-panel">
-      <label for="modeSelect">Mode</label>
-      <select id="modeSelect">
-        <option value="manual">Manual</option>
-        <option value="commissioning">Commissioning</option>
-        <option value="mapping">Mapping</option>
-        <option value="nav">Nav</option>
-        <option value="pickplace">PickPlace</option>
-        <option value="training">Training</option>
-        <option value="reliability">Reliability</option>
-        <option value="demo">Demo</option>
-      </select>
-      <button id="setModeBtn">Apply</button>
+    <div class="top-controls">
+      <div class="chip">
+        <span>Backend</span>
+        <strong id="wsState" class="warn">connecting</strong>
+      </div>
+      <div class="chip">
+        <span>Last Update</span>
+        <strong id="lastUpdateState" class="warn">never</strong>
+      </div>
+      <div class="mode-panel">
+        <label for="modeSelect">Mode</label>
+        <div class="mode-row">
+          <select id="modeSelect">
+            <option value="manual">Manual</option>
+            <option value="commissioning">Commissioning</option>
+            <option value="mapping">Mapping</option>
+            <option value="nav">Nav</option>
+            <option value="pickplace">PickPlace</option>
+            <option value="training">Training</option>
+            <option value="reliability">Reliability</option>
+            <option value="demo">Demo</option>
+          </select>
+          <button id="setModeBtn">Apply</button>
+        </div>
+      </div>
     </div>
   </header>
 
   <section class="statusbar">
+    <div class="status-chip"><span>Mode</span><strong id="modeState">manual</strong></div>
     <div class="status-chip"><span>Safety</span><strong id="safetyState">DISARMED</strong></div>
     <div class="status-chip"><span>E-stop</span><strong id="estopState">CLEAR</strong></div>
     <div class="status-chip"><span>Watchdog</span><strong id="watchdogState">Idle</strong></div>
@@ -44,15 +57,55 @@
     </div>
   </section>
 
-  <section class="visualizer">
-    <div>
-      <h2>Visualizer</h2>
-      <p>Use Foxglove with map/scan/TF/OAK streams via bridge:</p>
-      <code id="foxgloveWs">ws://&lt;jetson&gt;:8765</code>
+  <section class="visualizer-card">
+    <div class="visualizer-head">
+      <h2>Live Visualizer</h2>
+      <p>Built-in scan and camera streams. For full 3D/TF panels, open Foxglove with the Jetson bridge.</p>
     </div>
-    <div class="viz-actions">
-      <a id="foxgloveWebLink" href="#" target="_blank" rel="noopener">Open Foxglove Web</a>
-      <a href="/layouts/foxglove_layout.json" target="_blank" rel="noopener">Default Layout JSON</a>
+    <div class="visualizer-grid">
+      <article class="viz-panel">
+        <div class="panel-head">
+          <h3>Lidar Scan</h3>
+          <div class="mini-stats">
+            <span id="scanStatus" class="warn">Disconnected</span>
+            <span id="scanFps">0.0 Hz</span>
+            <span id="scanAge">age n/a</span>
+          </div>
+        </div>
+        <canvas id="scanCanvas" width="520" height="340"></canvas>
+      </article>
+
+      <article class="viz-panel">
+        <div class="panel-head">
+          <h3>OAK-D Stream</h3>
+          <div class="mini-stats">
+            <span id="cameraStatus" class="warn">Disconnected</span>
+            <span id="cameraFps">0.0 Hz</span>
+            <span id="cameraAge">age n/a</span>
+          </div>
+        </div>
+        <div class="camera-controls">
+          <label for="cameraTopicSelect">Camera topic</label>
+          <select id="cameraTopicSelect"></select>
+          <button id="cameraSelectBtn">Select</button>
+          <button id="cameraRefreshTopicsBtn">Refresh Topics</button>
+        </div>
+        <div class="camera-wrap">
+          <img id="cameraStreamImg" alt="Camera stream" />
+          <div class="camera-overlay" id="cameraTopicLabel">topic: n/a</div>
+        </div>
+      </article>
+    </div>
+
+    <div class="foxglove-row">
+      <div>
+        <strong>Foxglove bridge:</strong>
+        <code id="foxgloveWs">ws://&lt;jetson&gt;:8765</code>
+      </div>
+      <div class="fox-actions">
+        <a id="foxgloveWebLink" href="#" target="_blank" rel="noopener">Open Foxglove Web</a>
+        <a href="/layouts/foxglove_layout.json" target="_blank" rel="noopener">Default Layout JSON</a>
+      </div>
     </div>
   </section>
 
@@ -73,8 +126,8 @@
       <div class="grid tiles">
         <article><h4>Base Connected</h4><p id="tileBase">Unknown</p></article>
         <article><h4>Last Encoder Update</h4><p id="tileEncoder">n/a</p></article>
-        <article><h4>Lidar Rate (Hz)</h4><p id="tileLidar">0.0</p></article>
-        <article><h4>OAK Rate (Hz)</h4><p id="tileOak">0.0</p></article>
+        <article><h4>Lidar Rate</h4><p id="tileLidar">0.0 Hz</p></article>
+        <article><h4>OAK Topic Rate</h4><p id="tileOak">0.0 Hz</p></article>
         <article><h4>Nav State</h4><p id="tileNav">idle</p></article>
         <article><h4>Temps</h4><p id="tileTemps">n/a</p></article>
       </div>
@@ -83,7 +136,7 @@
         <button id="stackStopBtn">Stop Stack</button>
       </div>
       <div class="actions">
-        <input id="recordTagInput" placeholder="recording tags (example: bench-smoke)" />
+        <input id="recordTagInput" placeholder="recording tags (example: bench-smoke)">
         <button id="recordStartBtn">Start Recording</button>
         <button id="recordStopBtn">Stop Recording</button>
       </div>
@@ -117,47 +170,85 @@
           <button data-check="tf_sanity">Run</button>
           <small id="check-tf_sanity">Pending</small>
         </div>
+        <div class="check-row">
+          <span>Mode persistence (refresh + reconnect)</span>
+          <button data-check="mode_persistence_manual">Mark Verified</button>
+          <small id="check-mode_persistence_manual">Pending</small>
+        </div>
       </div>
+      <p class="note">Manual proof: pick a non-default mode, refresh browser, then restart network/WS and confirm mode is retained and reconciled.</p>
     </section>
 
     <section class="panel" id="tab-manual">
       <h3>Manual Control</h3>
       <div class="grid two">
         <article>
-          <h4>Base Teleop</h4>
-          <p>Hold deadman and use WASD or pad buttons.</p>
-          <button id="deadmanBtn" class="accent">Hold: Enable Motion</button>
-          <label for="speedSlider">Speed limit</label>
-          <input id="speedSlider" type="range" min="0.05" max="1.0" step="0.05" value="0.3" />
+          <h4>Motion Gating</h4>
+          <p>Robot starts disarmed. Enable motion before directional or motor-bank commands.</p>
+          <div class="actions">
+            <button id="deadmanToggleBtn" class="accent">Enable Motion (5s)</button>
+            <span id="deadmanState">disabled</span>
+            <span id="deadmanCountdown">0.0s</span>
+          </div>
+          <label for="speedSlider">Direction speed limit</label>
+          <input id="speedSlider" type="range" min="0.05" max="1.0" step="0.05" value="0.30">
           <p id="speedLabel">0.30 m/s</p>
+        </article>
+
+        <article>
+          <h4>Direction Buttons (Hold)</h4>
+          <p>Press and hold. Release immediately sends stop.</p>
           <div class="teleop-pad">
-            <button data-drive="forward">W</button>
-            <button data-drive="left">A</button>
-            <button data-drive="stop">STOP</button>
-            <button data-drive="right">D</button>
-            <button data-drive="reverse">S</button>
+            <button data-drive="forward">Forward</button>
+            <button data-drive="left">Left</button>
+            <button data-drive="stop" class="danger">Stop</button>
+            <button data-drive="right">Right</button>
+            <button data-drive="reverse">Backward</button>
           </div>
         </article>
+      </div>
+
+      <div class="grid two top-gap">
         <article>
-          <h4>Arm / Claw</h4>
+          <h4>Motor Bank</h4>
+          <p>Independent bank control. Range is -100..100 and requires motion enabled.</p>
+          <div class="slider-group">
+            <label for="leftBankSlider">Left bank <strong id="leftBankValue">0</strong></label>
+            <input id="leftBankSlider" type="range" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-group">
+            <label for="rightBankSlider">Right bank <strong id="rightBankValue">0</strong></label>
+            <input id="rightBankSlider" type="range" min="-100" max="100" step="1" value="0">
+          </div>
           <div class="actions">
-            <button id="gripperOpenBtn">Gripper Open</button>
-            <button id="gripperCloseBtn">Gripper Close</button>
+            <button id="sendMotorBankBtn">Send Bank Command</button>
+            <button id="centerMotorBankBtn">Center Sliders + Stop</button>
+          </div>
+        </article>
+
+        <article>
+          <h4>Arm Control</h4>
+          <p>Joint sliders publish absolute setpoints via <code>/api/arm/joints</code>.</p>
+          <div class="joint-grid" id="jointGrid">
+            <div class="joint-row"><label for="joint-j1">j1</label><input id="joint-j1" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j1-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j2">j2</label><input id="joint-j2" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j2-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j3">j3</label><input id="joint-j3" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j3-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j4">j4</label><input id="joint-j4" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j4-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j5">j5</label><input id="joint-j5" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j5-val">0.00</span></div>
+          </div>
+          <div class="actions">
+            <button id="sendJointsBtn">Send Joints</button>
             <button id="armStopBtn" class="danger">Stop Arm</button>
           </div>
           <div class="actions">
-            <select id="armPoseSelect">
-              <option value="stow">stow</option>
-              <option value="ready">ready</option>
-              <option value="pregrasp">pregrasp</option>
-              <option value="drop">drop</option>
-            </select>
-            <button id="armPoseBtn">Send Pose</button>
+            <button class="pose-btn" data-pose="stow">Stow</button>
+            <button class="pose-btn" data-pose="ready">Ready</button>
+            <button class="pose-btn" data-pose="pregrasp">Pregrasp</button>
+            <button class="pose-btn" data-pose="drop">Drop</button>
           </div>
           <div class="actions">
-            <input id="jointNameInput" value="j1" />
-            <input id="jointDeltaInput" type="number" step="0.01" value="0.05" />
-            <button id="jointJogBtn">Jog Joint</button>
+            <button id="gripperOpenBtn">Gripper Open</button>
+            <button id="gripperCloseBtn">Gripper Close</button>
           </div>
         </article>
       </div>
@@ -170,7 +261,7 @@
         <button id="slamStopBtn">Stop SLAM Toolbox</button>
       </div>
       <div class="actions">
-        <input id="mapNameInput" placeholder="map filename (without extension)" value="living_room_map" />
+        <input id="mapNameInput" placeholder="map filename (without extension)" value="living_room_map">
         <button id="saveMapBtn">Save Map</button>
         <span id="savedMapLabel">Last map: none</span>
       </div>
@@ -179,9 +270,9 @@
       </div>
       <h4>Set Initial Pose</h4>
       <div class="actions">
-        <input id="initX" type="number" step="0.1" value="0.0" />
-        <input id="initY" type="number" step="0.1" value="0.0" />
-        <input id="initYaw" type="number" step="0.1" value="0.0" />
+        <input id="initX" type="number" step="0.1" value="0.0">
+        <input id="initY" type="number" step="0.1" value="0.0">
+        <input id="initYaw" type="number" step="0.1" value="0.0">
         <button id="setInitialPoseBtn">Set Initial Pose</button>
       </div>
     </section>
@@ -189,9 +280,9 @@
     <section class="panel" id="tab-navigation">
       <h3>Navigation</h3>
       <div class="actions">
-        <input id="goalX" type="number" step="0.1" placeholder="x" value="0.0" />
-        <input id="goalY" type="number" step="0.1" placeholder="y" value="0.0" />
-        <input id="goalYaw" type="number" step="0.1" placeholder="yaw" value="0.0" />
+        <input id="goalX" type="number" step="0.1" placeholder="x" value="0.0">
+        <input id="goalY" type="number" step="0.1" placeholder="y" value="0.0">
+        <input id="goalYaw" type="number" step="0.1" placeholder="yaw" value="0.0">
         <button id="sendGoalBtn">Send Goal</button>
       </div>
       <p>Nav state: <strong id="navStateLabel">idle</strong> | Last result: <strong id="navResultLabel">none</strong></p>
@@ -219,14 +310,14 @@
     <section class="panel" id="tab-training">
       <h3>Training / Data</h3>
       <div class="actions">
-        <input id="trainTagsInput" placeholder="training tags" />
+        <input id="trainTagsInput" placeholder="training tags">
         <button id="trainRecordStartBtn">Start Bag</button>
         <button id="trainRecordStopBtn">Stop Bag</button>
       </div>
       <button id="refreshRecordingsBtn">Refresh Recordings</button>
       <ul id="recordingsList"></ul>
       <div class="actions">
-        <input id="replayPathInput" placeholder="/path/to/bag" />
+        <input id="replayPathInput" placeholder="/path/to/bag">
         <button id="replayHintBtn">Replay Bag Command</button>
       </div>
       <pre id="replayHintOutput"></pre>
@@ -242,7 +333,7 @@
         <article>
           <h4>Demo Run</h4>
           <div class="actions">
-            <input id="demoCountInput" type="number" min="1" value="5" />
+            <input id="demoCountInput" type="number" min="1" value="5">
             <button id="demoRunBtn">Run N Toys</button>
             <button id="demoStopBtn">Stop Demo</button>
           </div>
