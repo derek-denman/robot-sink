@@ -11,31 +11,26 @@ cd ~/robot-sink
 
 Default behavior:
 
-- Configures BB USB networking (`192.168.7.1/24`)
-- Starts `foxglove_bridge`, Robot Console backend, OAK-D, RPLIDAR, RoArm, task-stack, and BB bridge processes
-- Uses real ROS nodes if installed, otherwise starts stubs
-- Writes logs to `jetson/logs/`
+- Configures BB USB networking (`192.168.7.1/24`) when possible
+- Starts `foxglove_bridge`, `robot_console`, OAK-D, RPLIDAR, RoArm stub, task stub, and BB bridge
+- Uses real ROS nodes when installed, otherwise falls back to stubs
+- Writes logs under `jetson/logs/`
 
 ## Robot Console Quick Start
 
-Once the stack is running:
+When stack is running:
 
-- Open `http://<jetson>:8080`
-- WebSocket telemetry path is `ws://<jetson>:8080/ws`
-- Foxglove bridge endpoint is `ws://<jetson>:8765`
+- Console UI: `http://<jetson>:8080`
+- Console websocket: `ws://<jetson>:8080/ws`
+- Foxglove bridge: `ws://<jetson>:8765`
 
-Robot Console assets/config:
+Paths:
 
-- Static UI: `jetson/console/web/`
+- Web assets: `jetson/console/web/`
 - Config: `jetson/console/console_config.yaml`
-- Layout seed: `jetson/console/layouts/foxglove_layout.json`
+- Foxglove layout seed: `jetson/console/layouts/foxglove_layout.json`
 
-Robot Console log files:
-
-- `jetson/logs/robot-console.log`
-- `jetson/logs/foxglove.log`
-
-### Acceptance Test Steps
+## Acceptance Test (Jetson)
 
 1. Start stack:
 
@@ -43,20 +38,115 @@ Robot Console log files:
 ./jetson/scripts/run_stack.sh
 ```
 
-2. Open UI:
+Expected:
 
-```text
-http://<jetson>:8080
+- `Starting foxglove: ...`
+- `Starting robot-console: ...`
+- `Stack running. Logs: ...`
+
+2. Confirm telemetry endpoint:
+
+```bash
+python3 - <<'PY'
+import json, urllib.request
+with urllib.request.urlopen('http://127.0.0.1:8080/api/status', timeout=5) as r:
+    data = json.load(r)
+print(data['mode'])
+print(data['visualizer']['scan']['fps'], data['visualizer']['camera']['fps'])
+PY
 ```
 
-3. Verify telemetry websocket updates (status bar/dashboard refresh continuously).
-4. Manual test: set mode `Manual`, hold deadman, publish teleop command, and verify downstream base command path receives `cmd_vel`.
-5. Verify Foxglove connection to `ws://<jetson>:8765`.
-6. Start/stop recording in UI and confirm bag directory created in configured bag storage path.
+Expected: mode value present, stream FPS values non-zero when sensors are publishing.
+
+3. Verify mode persistence behavior (refresh + reconnect):
+
+```bash
+python3 - <<'PY'
+import asyncio, json, urllib.request, aiohttp
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req,timeout=5) as r:
+        return json.loads(r.read().decode())
+def mode():
+    with urllib.request.urlopen(BASE+'/api/status',timeout=5) as r:
+        return json.loads(r.read().decode())['mode']
+async def ws_mode_once():
+    async with aiohttp.ClientSession() as s:
+        async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+            msg = await ws.receive(timeout=3)
+            return json.loads(msg.data)['data']['mode']
+post('/api/mode', {'mode':'demo'})
+print('refresh', mode())
+print('ws1', asyncio.run(ws_mode_once()))
+print('ws2', asyncio.run(ws_mode_once()))
+post('/api/mode', {'mode':'manual'})
+PY
+```
+
+Expected: same mode value from refresh and both websocket reconnects.
+
+4. Verify manual + safety gating:
+
+```bash
+python3 - <<'PY'
+import json, time, urllib.request
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req,timeout=5) as r:
+        return json.loads(r.read().decode())
+post('/api/mode', {'mode':'manual'})
+post('/api/arm', {'armed':True})
+print('bank_armed', post('/api/motor_bank', {'left':20,'right':20}))
+time.sleep(1.2)
+print('bank_timeout', post('/api/motor_bank', {'left':20,'right':20}))
+print('stop_all', post('/api/stop_all', {}))
+PY
+```
+
+Expected: first command accepted, timeout command rejected (`robot_not_armed`), `stop_all` succeeds.
+
+5. Verify lidar + camera topics:
+
+```bash
+source /opt/ros/humble/setup.bash
+timeout 6s ros2 topic hz /scan
+timeout 6s ros2 topic hz /oak/rgb/image_rect/compressed
+```
+
+Expected: non-zero rates.
+
+6. Verify Foxglove bridge socket:
+
+```bash
+nc -vz 127.0.0.1 8765
+```
+
+Expected: connection succeeded.
+
+7. Verify recording path:
+
+```bash
+python3 - <<'PY'
+import json, time, urllib.request
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req,timeout=8) as r:
+        return json.loads(r.read().decode())
+print(post('/api/recording/start', {'tags':'stack-test','topics':['/scan']}))
+time.sleep(1.5)
+print(post('/api/recording/stop', {}))
+PY
+ls -1dt ~/robot-sink/data/bags/* | head -n 2
+```
+
+Expected: recording start/stop returns `ok: true`; new bag directory appears.
 
 ## Override Launch Commands
 
-Use env vars to replace defaults with your real packages/launch files:
+Use env vars to replace defaults with real launches:
 
 ```bash
 OAK_LAUNCH_CMD='ros2 launch depthai_ros_driver camera.launch.py' \
@@ -68,16 +158,16 @@ ROBOT_CONSOLE_CMD='ros2 launch robot_console robot_console.launch.py start_foxgl
 ./jetson/scripts/run_stack.sh
 ```
 
-## Enable Auto-Start at Boot
+## Enable Boot-Time Service
 
-Service is disabled by default until you enable it:
+Install/enable service (disabled by default):
 
 ```bash
 cd ~/robot-sink
-./jetson/scripts/enable_services.sh --user ubuntu --now
+./jetson/scripts/enable_services.sh --user jetson --now
 ```
 
-Service controls:
+Service commands:
 
 ```bash
 sudo systemctl status robot-jetson-stack.service
