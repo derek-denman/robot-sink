@@ -11,6 +11,7 @@ extern "C" {
 #define BBB_MSG_MAGIC 0x42424747u
 #define BBB_MSG_VERSION 1u
 #define BBB_MSG_PAYLOAD_MAX 48u
+#define BBB_MSG_WIRE_SIZE 62u
 
 #define BBB_MODULE_HOST 0u
 #define BBB_MODULE_PRU0 1u
@@ -117,7 +118,7 @@ static inline uint16_t bbb_checksum16_bytes(const uint8_t *bytes, uint16_t len)
 static inline uint16_t bbb_message_checksum(const bbb_msg_t *msg)
 {
     return bbb_checksum16_bytes((const uint8_t *)msg,
-                                (uint16_t)(sizeof(bbb_msg_t) - sizeof(uint16_t)));
+                                (uint16_t)(BBB_MSG_WIRE_SIZE - sizeof(uint16_t)));
 }
 
 static inline void bbb_init_message(bbb_msg_t *msg,

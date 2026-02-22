@@ -1,0 +1,36 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "ti,am33xx";
+
+    /*
+     * Some AM335x images expose PRU remoteproc nodes with incomplete RPMsg
+     * interrupt wiring. Ensure both interrupts used by pru_rproc are present:
+     *   - "vring": PRU -> ARM notify path
+     *   - "kick":  ARM -> PRU notify path
+     *
+     * Mappings used here follow TI AM335x defaults:
+     *   pru0 vring: event 16, channel 2, host 2
+     *   pru0 kick:  event 17, channel 0, host 0
+     *   pru1 vring: event 18, channel 3, host 3
+     *   pru1 kick:  event 19, channel 1, host 1
+     */
+    fragment@0 {
+        target = <&pru0>;
+        __overlay__ {
+            interrupt-parent = <&pruss_intc>;
+            interrupts = <16 2 2>, <17 0 0>;
+            interrupt-names = "vring", "kick";
+        };
+    };
+
+    fragment@1 {
+        target = <&pru1>;
+        __overlay__ {
+            interrupt-parent = <&pruss_intc>;
+            interrupts = <18 3 3>, <19 1 1>;
+            interrupt-names = "vring", "kick";
+        };
+    };
+};

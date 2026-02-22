@@ -6,6 +6,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 echo "[install_deps] repo root: ${REPO_ROOT}"
 
+apt_pkg_installable() {
+  local pkg="$1"
+  local candidate=""
+
+  if ! apt-cache show "${pkg}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  candidate="$(apt-cache policy "${pkg}" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  [[ -n "${candidate}" && "${candidate}" != "(none)" ]]
+}
+
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
 
@@ -17,7 +29,7 @@ if command -v apt-get >/dev/null 2>&1; then
     fi
   fi
 
-  CANDIDATE_PKGS=(
+  BASE_PKGS=(
     make
     git
     device-tree-compiler
@@ -27,19 +39,34 @@ if command -v apt-get >/dev/null 2>&1; then
     gcc-pru
     binutils-pru
     libc6-pru
-    pru-software-support-package
     ti-pru-cgt-v2.3
+  )
+
+  PRU_SSP_ALTERNATES=(
+    pru-software-support-package
     ti-pru-software-v6.3
+    ti-pru-software-v6.2
+    ti-pru-software-v6.1
+    ti-pru-software-v6.0
+    ti-pru-software-v5.9
   )
 
   INSTALL_PKGS=()
-  for pkg in "${CANDIDATE_PKGS[@]}"; do
-    if apt-cache show "${pkg}" >/dev/null 2>&1; then
+  for pkg in "${BASE_PKGS[@]}"; do
+    if apt_pkg_installable "${pkg}"; then
       INSTALL_PKGS+=("${pkg}")
     fi
   done
 
+  for pkg in "${PRU_SSP_ALTERNATES[@]}"; do
+    if apt_pkg_installable "${pkg}"; then
+      INSTALL_PKGS+=("${pkg}")
+      break
+    fi
+  done
+
   if ((${#INSTALL_PKGS[@]} > 0)); then
+    echo "[install_deps] installing apt packages: ${INSTALL_PKGS[*]}"
     sudo apt-get install -y "${INSTALL_PKGS[@]}"
   fi
 fi

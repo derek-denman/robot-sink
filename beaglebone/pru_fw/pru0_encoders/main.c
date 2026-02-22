@@ -21,6 +21,14 @@
 #define VIRTIO_CONFIG_S_DRIVER_OK 4
 #endif
 
+#if !defined(BBB_RPMSG_CHANNEL_WITH_DESC) && !defined(BBB_RPMSG_CHANNEL_NO_DESC)
+#if defined(__TI_COMPILER_VERSION__)
+#define BBB_RPMSG_CHANNEL_NO_DESC 1
+#else
+#define BBB_RPMSG_CHANNEL_WITH_DESC 1
+#endif
+#endif
+
 volatile register uint32_t __R31;
 
 #define CHAN_NAME "rpmsg-pru"
@@ -35,6 +43,9 @@ volatile register uint32_t __R31;
 #define DEFAULT_LOOP_PERIOD_US 20u
 
 #define RPMSG_VRING_SIZE 16
+#define RPMSG_NOTIFYID_VDEV 0u
+#define RPMSG_NOTIFYID_VRING0 1u
+#define RPMSG_NOTIFYID_VRING1 2u
 
 struct my_resource_table {
     struct resource_table base;
@@ -58,7 +69,7 @@ struct my_resource_table resourceTable = {
     .rpmsg_vdev = {
         .type = TYPE_VDEV,
         .id = VIRTIO_ID_RPMSG,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VDEV,
         .dfeatures = 1 << VIRTIO_RPMSG_F_NS,
         .gfeatures = 0,
         .config_len = 0,
@@ -70,14 +81,14 @@ struct my_resource_table resourceTable = {
         .da = FW_RSC_ADDR_ANY,
         .align = 16,
         .num = RPMSG_VRING_SIZE,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VRING0,
         .reserved = 0,
     },
     .rpmsg_vring1 = {
         .da = FW_RSC_ADDR_ANY,
         .align = 16,
         .num = RPMSG_VRING_SIZE,
-        .notifyid = 0,
+        .notifyid = RPMSG_NOTIFYID_VRING1,
         .reserved = 0,
     },
 };
@@ -93,6 +104,7 @@ static struct pru_rpmsg_transport g_transport;
 static uint16_t g_last_src;
 static uint16_t g_last_dst;
 static uint8_t g_has_host_peer;
+typedef uint16_t rpmsg_len_t;
 
 static int32_t g_counts[4];
 static int32_t g_velocity_tps[4];
@@ -112,14 +124,17 @@ static uint16_t g_sequence;
 
 static int16_t rpmsg_create_channel(struct pru_rpmsg_transport *transport)
 {
-#ifdef BBB_RPMSG_CHANNEL_NO_DESC
-    return pru_rpmsg_channel(RPMSG_NS_CREATE, transport, CHAN_NAME, CHAN_PORT);
+#if defined(BBB_RPMSG_CHANNEL_WITH_DESC)
+    return pru_rpmsg_channel(RPMSG_NS_CREATE,
+                             transport,
+                             (char *)CHAN_NAME,
+                             (char *)CHAN_DESC,
+                             (int32_t)CHAN_PORT);
 #else
     return pru_rpmsg_channel(RPMSG_NS_CREATE,
                              transport,
-                             CHAN_NAME,
-                             CHAN_DESC,
-                             CHAN_PORT);
+                             (char *)CHAN_NAME,
+                             (int32_t)CHAN_PORT);
 #endif
 }
 
@@ -161,7 +176,7 @@ static void send_message(const bbb_msg_t *msg)
                          g_last_dst,
                          g_last_src,
                          (void *)msg,
-                         sizeof(*msg));
+                         (uint16_t)BBB_MSG_WIRE_SIZE);
 }
 
 static void send_ack(uint16_t request_sequence, int16_t status, uint16_t detail)
@@ -317,8 +332,8 @@ static void process_rpmsg(void)
 {
     uint16_t src;
     uint16_t dst;
-    uint16_t len;
-    uint8_t payload[sizeof(bbb_msg_t)];
+    rpmsg_len_t len = 0u;
+    uint8_t payload[BBB_MSG_WIRE_SIZE];
 
     while (pru_rpmsg_receive(&g_transport,
                              &src,
@@ -327,11 +342,12 @@ static void process_rpmsg(void)
                              &len) == PRU_RPMSG_SUCCESS) {
         bbb_msg_t msg;
 
-        if ((uint16_t)len < sizeof(msg)) {
+        if (len < (rpmsg_len_t)BBB_MSG_WIRE_SIZE) {
             continue;
         }
 
-        memcpy(&msg, payload, sizeof(msg));
+        memset(&msg, 0, sizeof(msg));
+        memcpy(&msg, payload, BBB_MSG_WIRE_SIZE);
         g_last_src = src;
         g_last_dst = dst;
         g_has_host_peer = 1u;
