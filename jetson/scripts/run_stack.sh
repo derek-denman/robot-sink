@@ -104,6 +104,8 @@ if [[ -n "${ROBOT_CONSOLE_CMD:-}" ]]; then
   start_cmd "robot-console" "${ROBOT_CONSOLE_CMD}"
 elif ros_pkg_exists robot_console; then
   start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+elif [[ -d "${ROBOT_ROOT}/ros_ws/src/robot_console/robot_console" ]]; then
+  start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
 else
   start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot_console package missing; build ros_ws first'"
 fi
