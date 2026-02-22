@@ -52,7 +52,12 @@ npm run build:web
 
 Built-in visualizer:
 
-- Live lidar canvas from websocket `/scan` payloads
+- Waymo-style 2D map view:
+  - live `/map` occupancy grid
+  - `/scan` overlay in map frame
+  - robot pose arrow from TF (`map -> odom -> base_link`)
+  - optional nav path overlay (configurable path topic)
+- Live 3D point-cloud view from `sensor_msgs/PointCloud2` (topic-selectable)
 - Live camera MJPEG stream from `/stream/camera.mjpeg`
 - FPS/age/connected indicators
 
@@ -81,6 +86,33 @@ API endpoints:
 - `GET /api/logs/sources`
 - `GET /api/logs/stream?source=<id>&tail=<n>` (SSE)
 - `GET /api/logs/diagnostics` (text bundle, optional download)
+
+Mapping endpoints:
+
+- `GET /api/map/status`
+- `GET /api/map/topics`
+- `POST /api/map/config`
+- `GET /api/pointcloud/topics`
+- `POST /api/pointcloud/select`
+
+## Sensor Placement Prerequisites
+
+- RPLIDAR A1:
+  - Keep a mostly unobstructed 360 degree scan plane for SLAM.
+  - Mount above arm sweep, or enforce arm-stowed while mapping/navigation.
+  - Some near-field occlusion is acceptable; avoid leaving only a narrow visibility window.
+  - Let lidar warm up for >2 minutes before calibration-grade mapping.
+  - Avoid direct sunlight/high-power laser exposure.
+- OAK-D Lite:
+  - Rigid mount, forward-facing, no wobble.
+  - Use 1/4-20 tripod mount or 7.5 cm VESA M4 pattern as needed.
+  - Choose height/pitch so it sees both pick floor zone and working-distance targets.
+  - Keep on USB3; USB2 may be unstable under depth+RGB load.
+  - If brownout-like behavior appears, use a powered hub or supplemental power.
+- TF checklist before mapping:
+  - Measure and record `base_link -> lidar_link` `(x, y, z, yaw)`.
+  - Measure and record `base_link -> camera_link` `(x, y, z, yaw)`.
+  - Apply in URDF and validate with TF tools before SLAM.
 
 ## Jetson Validation Commands
 
@@ -117,6 +149,30 @@ PY
 ```
 
 Expected: includes `status` and `scan` events.
+
+2b. Mapping websocket telemetry:
+
+```bash
+python3 - <<'PY'
+import asyncio, json, aiohttp
+async def main():
+  seen=set()
+  async with aiohttp.ClientSession() as s:
+    async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+      for _ in range(20):
+        m = await ws.receive(timeout=4)
+        if m.type == aiohttp.WSMsgType.TEXT:
+          t = json.loads(m.data).get('type')
+          if t in {'map','map_overlay','pointcloud'}:
+            seen.add(t)
+        if len(seen) == 3:
+          break
+  print('seen', sorted(seen))
+asyncio.run(main())
+PY
+```
+
+Expected: `map_overlay` appears continuously when scan+TF are active; `map` and `pointcloud` appear when those topics publish.
 
 3. Mode persistence across reconnect:
 
@@ -216,6 +272,23 @@ ls -1dt ~/robot-sink/data/bags/* | head -n 2
 ```
 
 Expected: start/stop `ok: true`, and a new bag directory appears.
+
+8. Mapping topic checks:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 topic list | grep -E "/map|/scan|cloud|points"
+timeout 8 ros2 topic hz /scan
+ros2 topic echo /map --once | sed -n '1,40p'
+ros2 run tf2_ros tf2_echo map base_link | sed -n '1,20p'
+```
+
+Expected:
+
+- `/map` and `/scan` are listed when SLAM is running.
+- `/scan` rate is non-zero.
+- `/map` echo returns occupancy metadata.
+- `tf2_echo` returns live transform updates for `map -> base_link`.
 
 ## Troubleshooting
 
