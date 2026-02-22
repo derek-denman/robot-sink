@@ -93,6 +93,11 @@ Revert if needed:
 sudo reboot
 ```
 
+Notes:
+
+- TI has acknowledged RPMsg instability on some `6.1-ti` PRU remoteproc stacks; prefer `5.10-ti` when available.
+- Reference: https://e2e.ti.com/support/processors-group/processors/f/processors-forum/1428220/am6442-remoteproc-kernel-panic-during-rpmsg-operation
+
 ### Stability check (post-reboot)
 
 ```bash
@@ -117,7 +122,7 @@ kill $DAEMON_PID || true
 sudo kill $DMESG_PID || true
 ```
 
-## 3) PRU boot fails with `IRQ vring not found` / `Boot failed: -6`
+## 3) PRU boot fails with `IRQ vring not found` / `IRQ kick not found` / `Boot failed: -6`
 
 ### Symptom
 
@@ -125,13 +130,14 @@ On some `6.1-ti` images, `deploy_firmware.sh` reports:
 
 ```text
 pru-rproc ... error -ENXIO: IRQ vring not found
+pru-rproc ... error -ENXIO: IRQ kick not found
 remoteproc ... unable to get vring interrupt, status = -6
 remoteproc ... Boot failed: -6
 ```
 
 ### Cause
 
-The running DTB can expose PRU nodes without the vring interrupt wiring (`interrupt-parent` / `interrupts` / `interrupt-names`) expected by `pru_rproc`.
+The running DTB can expose PRU nodes without full RPMsg interrupt wiring (`interrupt-parent` / `interrupts` / `interrupt-names`) expected by `pru_rproc` (`vring` and `kick`).
 
 ### Fix path
 

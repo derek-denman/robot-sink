@@ -36,6 +36,7 @@ sudo reboot
 ```
 
 Overlay names like `AM335X-PRU-RPROC-4-19-TI-...` imply a matching kernel series; do not mix unrelated series.
+If both `5.10-ti` and `6.1-ti` are installed, prefer `5.10-ti` for PRU RPMsg stability.
 
 ## 4) Build PRU Firmware
 
@@ -79,7 +80,7 @@ sudo reboot
 ./beaglebone/scripts/deploy_firmware.sh
 ```
 
-If deploy fails with vring IRQ errors (`Boot failed: -6`, `IRQ vring not found`), apply the PRU IRQ overlay fix:
+If deploy fails with PRU IRQ mapping errors (`Boot failed: -6`, `IRQ vring not found`, or `IRQ kick not found`), apply the PRU IRQ overlay fix:
 
 ```bash
 ./beaglebone/scripts/pru_rproc_irq_fix.sh --plan

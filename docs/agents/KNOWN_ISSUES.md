@@ -42,6 +42,7 @@ Back: [Agent Index](INDEX.md) | [Root Start Here](../../AGENTS.md)
 ### 3a) Kernel Oops in RPMsg kick path (`pru_rproc_kick`)
 - Symptom: `dmesg` shows `Internal error: Oops` with `PC is at pru_rproc_kick...` after daemon or RPMsg writes.
 - Diagnosis: active kernel/overlay combination is unstable for RPMsg kick path on this image.
+- Note: some `6.1-ti` stacks are known unstable for PRU RPMsg; prefer `5.10-ti` when available.
 - Use:
   ```bash
   ./beaglebone/scripts/pru_rpmsg_kernel_hop.sh --plan
@@ -55,9 +56,9 @@ Back: [Agent Index](INDEX.md) | [Root Start Here](../../AGENTS.md)
   sudo reboot
   ```
 
-### 3b) PRU Boot Fails `IRQ vring not found` (`Boot failed: -6`)
-- Symptom: `pru-rproc ... IRQ vring not found` and PRU remoteproc boot fails with `-6`.
-- Diagnosis: PRU DT node lacks vring interrupt wiring for `pru_rproc`.
+### 3b) PRU Boot Fails `IRQ vring not found` / `IRQ kick not found` (`Boot failed: -6`)
+- Symptom: `pru-rproc ... IRQ vring not found` or `IRQ kick not found` and PRU remoteproc boot fails with `-6`.
+- Diagnosis: PRU DT node lacks full RPMsg interrupt wiring (`vring` and `kick`) for `pru_rproc`.
 - Use:
   ```bash
   ./beaglebone/scripts/pru_rproc_irq_fix.sh --plan
