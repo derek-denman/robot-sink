@@ -8,7 +8,9 @@ UENV_PATH="/boot/uEnv.txt"
 BACKUP_GLOB="/boot/uEnv.txt.robot-sink.uio-workaround.bak-*"
 ENABLE_SERVICES_SCRIPT="${REPO_ROOT}/beaglebone/scripts/enable_services.sh"
 INSTALL_DEPS_SCRIPT="${REPO_ROOT}/beaglebone/scripts/install_deps.sh"
+DAEMON_REQS="${REPO_ROOT}/beaglebone/host_daemon/requirements.txt"
 VENV_PY="${REPO_ROOT}/beaglebone/host_daemon/.venv/bin/python"
+VENV_DIR="${REPO_ROOT}/beaglebone/host_daemon/.venv"
 
 MODE=""
 
@@ -117,7 +119,14 @@ ensure_service_prereqs() {
 
   [[ -x "${INSTALL_DEPS_SCRIPT}" ]] || die "missing ${INSTALL_DEPS_SCRIPT}"
   log "host daemon virtualenv missing; running install_deps.sh"
-  "${INSTALL_DEPS_SCRIPT}"
+  if ! "${INSTALL_DEPS_SCRIPT}"; then
+    log "install_deps.sh failed; attempting minimal host-daemon venv bootstrap"
+    [[ -f "${DAEMON_REQS}" ]] || die "missing ${DAEMON_REQS}"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required"
+    python3 -m venv "${VENV_DIR}"
+    "${VENV_DIR}/bin/python" -m pip install -U pip wheel
+    "${VENV_DIR}/bin/python" -m pip install -r "${DAEMON_REQS}"
+  fi
 
   [[ -x "${VENV_PY}" ]] || die "virtualenv still missing at ${VENV_PY} after install_deps.sh"
 }
