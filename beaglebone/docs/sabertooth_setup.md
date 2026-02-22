@@ -63,3 +63,9 @@ Use this workflow:
 - Daemon command timeout: `200 ms`
 - Safe-stop hold: `300 ms`
 - Arm required after every estop/watchdog event
+
+## RPMsg Kernel Workaround Mode
+
+If BeagleBone is running the plan-of-record RPMsg workaround (`pru_rpmsg_uio_workaround.sh --apply`), the daemon service runs in `--dry-run` mode.
+
+In this mode, Sabertooth serial writes are intentionally disabled and drivetrain motion commands are no-op for safety and system stability.

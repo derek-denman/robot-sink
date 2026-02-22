@@ -89,7 +89,32 @@ sudo reboot
 ./beaglebone/scripts/deploy_firmware.sh
 ```
 
-## 6) Start Daemon (manual run first)
+## 6) Plan-Of-Record Fallback (UIO + daemon dry-run)
+
+If RPMsg remains unstable across available kernels (`pru_rproc_kick` Oops), switch to the persistent fallback:
+
+```bash
+./beaglebone/scripts/pru_rpmsg_uio_workaround.sh --plan
+./beaglebone/scripts/pru_rpmsg_uio_workaround.sh --apply
+sudo reboot
+```
+
+Post-reboot checks for fallback mode:
+
+```bash
+grep -E '^(uname_r|uboot_overlay_pru|uboot_overlay_addr4)=' /boot/uEnv.txt || true
+systemctl cat bbb-base-daemon.service | grep -E '^ExecStart='
+python3 beaglebone/tools/cli_test.py status
+```
+
+Expected in fallback mode:
+
+- `uboot_overlay_pru=AM335X-PRU-UIO-00A0.dtbo`
+- no `uboot_overlay_addr4` line
+- daemon `ExecStart` contains `--dry-run`
+- API status reports `"dry_run": true`
+
+## 7) Start Daemon (manual run first)
 
 ```bash
 python3 beaglebone/host_daemon/bbb_base_daemon.py \
@@ -104,7 +129,7 @@ python3 beaglebone/host_daemon/bbb_base_daemon.py \
   --dry-run
 ```
 
-## 7) RPMsg Stability Regression Check
+## 8) RPMsg Stability Regression Check
 
 Run this on BeagleBone after firmware deploy to verify no kernel crash in `pru_rproc_kick` under live traffic:
 
@@ -132,7 +157,7 @@ kill $DAEMON_PID || true
 sudo kill $DMESG_PID || true
 ```
 
-## 8) Validate API + Encoder Flow
+## 9) Validate API + Encoder Flow
 
 ```bash
 python3 beaglebone/tools/cli_test.py status
@@ -146,7 +171,7 @@ Reset encoders:
 python3 beaglebone/tools/cli_test.py reset-encoders
 ```
 
-## 9) GUI
+## 10) GUI
 
 Open:
 
@@ -159,13 +184,19 @@ Use sequence:
 3. Trigger E-STOP
 4. Re-arm after hold period
 
-## 10) Enable Service
+## 11) Enable Service
 
 ```bash
 ./beaglebone/scripts/enable_services.sh
 ```
 
-## 11) Bench Plan
+For fallback mode service startup after reboot:
+
+```bash
+./beaglebone/scripts/enable_services.sh --dry-run
+```
+
+## 12) Bench Plan
 
 1. **No motors connected**: verify PRU1 TX waveform on selected TX pin and baud timing.
 2. **Motors off-ground**: verify direction, S2 stop action, and watchdog trip behavior.

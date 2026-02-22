@@ -157,7 +157,43 @@ Revert if needed:
 sudo reboot
 ```
 
-## 4) rpmsg Device Missing
+## 4) Plan-of-record fallback: UIO overlay + daemon `--dry-run`
+
+### When to use this
+
+Use this when RPMsg is consistently unstable (kernel Oops in `pru_rproc_kick`) across available kernels and overlay fixes.
+
+### Apply
+
+```bash
+./beaglebone/scripts/pru_rpmsg_uio_workaround.sh --plan
+./beaglebone/scripts/pru_rpmsg_uio_workaround.sh --apply
+sudo reboot
+```
+
+### Validate after reboot
+
+```bash
+grep -E '^(uname_r|uboot_overlay_pru|uboot_overlay_addr4)=' /boot/uEnv.txt || true
+systemctl cat bbb-base-daemon.service | grep -E '^ExecStart='
+python3 beaglebone/tools/cli_test.py status
+```
+
+Expected:
+
+- `uboot_overlay_pru=AM335X-PRU-UIO-00A0.dtbo`
+- `uboot_overlay_addr4` absent
+- daemon `ExecStart` includes `--dry-run`
+- API status reports `"dry_run": true`
+
+### Revert
+
+```bash
+./beaglebone/scripts/pru_rpmsg_uio_workaround.sh --revert
+sudo reboot
+```
+
+## 5) rpmsg Device Missing
 
 Expected defaults:
 
@@ -166,7 +202,7 @@ Expected defaults:
 
 If names differ, update `beaglebone/host_daemon/config.yaml` (`pru.encoder_rpmsg_dev`, `pru.motor_rpmsg_dev`).
 
-## 5) Daemon Runs But No Encoder Updates
+## 6) Daemon Runs But No Encoder Updates
 
 - Confirm encoder input pins are muxed to PRU0 inputs.
 - Confirm 5V->3.3V buffering is present and grounds are common.
@@ -176,21 +212,21 @@ If names differ, update `beaglebone/host_daemon/config.yaml` (`pru.encoder_rpmsg
 python3 beaglebone/tools/log_encoders.py --period 0.1
 ```
 
-## 6) Motors Do Not Move
+## 7) Motors Do Not Move
 
 - Confirm mode/baud/address in `config.yaml` match Sabertooth DIP setup.
 - Confirm S1 receives TX from selected PRU1 TX pin.
 - Confirm S2 is released only after arm.
 - Confirm no active estop/watchdog state in `/api/status`.
 
-## 7) Immediate Watchdog Trips
+## 8) Immediate Watchdog Trips
 
 Likely command update timeout is too short for your test loop.
 
 - Increase `safety.command_timeout_ms` in `config.yaml`.
 - Keep GUI/CLI sending commands periodically while armed.
 
-## 8) Validate Firmware Build/Load
+## 9) Validate Firmware Build/Load
 
 Build:
 
