@@ -39,6 +39,17 @@ export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT
 
 mkdir -p "${LOG_DIR}"
 
+STACK_LOCK_FILE="${JETSON_STACK_LOCK_FILE:-/tmp/robot-jetson-stack.lock}"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"${STACK_LOCK_FILE}"
+  if ! flock -n 9; then
+    log "Another run_stack instance is already active (lock: ${STACK_LOCK_FILE}). Exiting."
+    exit 0
+  fi
+else
+  log "flock not found; duplicate stack instances are not prevented."
+fi
+
 if [[ "${SETUP_BB_NETWORK:-1}" == "1" ]]; then
   log "Configuring BeagleBone USB networking"
   if ! "${SCRIPT_DIR}/setup_bb_usb_network.sh"; then
@@ -115,6 +126,11 @@ ros_pkg_exists() {
   command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix "${pkg}" >/dev/null 2>&1
 }
 
+process_running() {
+  local pattern="$1"
+  pgrep -f "${pattern}" >/dev/null 2>&1
+}
+
 port_is_listening() {
   local host="$1"
   local port="$2"
@@ -157,7 +173,12 @@ fi
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
 elif ros_pkg_exists depthai_ros_driver; then
-  start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
+  if process_running "[d]epthai_ros_driver camera.launch.py"; then
+    log "Detected existing depthai launch process; reusing existing OAK runtime."
+    start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver already running; using existing process'"
+  else
+    start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
+  fi
 else
   start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver not found; running stub'"
 fi
@@ -165,7 +186,12 @@ fi
 if [[ -n "${RPLIDAR_LAUNCH_CMD:-}" ]]; then
   start_cmd "rplidar" "${RPLIDAR_LAUNCH_CMD}"
 elif ros_pkg_exists rplidar_ros; then
-  start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
+  if process_running "[r]plidar_ros rplidar_a1_launch.py"; then
+    log "Detected existing rplidar launch process; reusing existing lidar runtime."
+    start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --hint 'rplidar_ros already running; using existing process'"
+  else
+    start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
+  fi
 else
   start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --check-device /dev/ttyRPLIDAR --hint 'rplidar_ros not found; running stub'"
 fi
