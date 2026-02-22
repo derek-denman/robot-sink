@@ -503,6 +503,28 @@ async def _json_request(request: web.Request) -> Dict[str, Any]:
 def _app_response(ok: bool, **kwargs: Any) -> web.Response:
     body = {"ok": ok}
     body.update(kwargs)
+
+    if not ok and "error" not in body:
+        result = body.get("result")
+        derived_error: Optional[str] = None
+        if isinstance(result, dict):
+            raw_error = result.get("error")
+            if isinstance(raw_error, str) and raw_error:
+                derived_error = raw_error
+            else:
+                nested_results = result.get("results")
+                if isinstance(nested_results, list):
+                    for item in nested_results:
+                        if not isinstance(item, dict):
+                            continue
+                        item_error = item.get("error")
+                        if isinstance(item_error, str) and item_error:
+                            service = str(item.get("service", "")).strip()
+                            derived_error = f"{service}:{item_error}" if service else item_error
+                            break
+        if derived_error:
+            body["error"] = derived_error
+
     return web.json_response(body)
 
 

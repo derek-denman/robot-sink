@@ -1,5 +1,6 @@
 const MODE_STORAGE_KEY = "robot_console.mode";
 const TAB_STORAGE_KEY = "robot_console.tab";
+const CAMERA_TOPIC_STORAGE_KEY = "robot_console.camera_topic";
 
 const state = {
   latest: null,
@@ -9,6 +10,8 @@ const state = {
   reconcilePending: true,
   reconcileInFlight: false,
   modeFromBackend: "manual",
+  modeApplyInFlight: false,
+  pendingMode: "",
   lastStatusUnixMs: 0,
 
   // Motion control
@@ -26,6 +29,8 @@ const state = {
 
   // Camera stream
   cameraTopic: "",
+  cameraApplyInFlight: false,
+  pendingCameraTopic: "",
   cameraFrameCount: 0,
   cameraFps: 0,
   cameraFpsWindowStartMs: 0,
@@ -52,6 +57,14 @@ function writeLocalTab(tab) {
   window.localStorage.setItem(TAB_STORAGE_KEY, tab);
 }
 
+function readLocalCameraTopic() {
+  return (window.localStorage.getItem(CAMERA_TOPIC_STORAGE_KEY) || "").trim();
+}
+
+function writeLocalCameraTopic(topic) {
+  window.localStorage.setItem(CAMERA_TOPIC_STORAGE_KEY, String(topic || ""));
+}
+
 async function fetchJson(path) {
   const response = await fetch(path, {
     method: "GET",
@@ -73,7 +86,31 @@ async function api(path, method = "POST", body = undefined) {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error || payload.message || `${method} ${path} failed`);
+    const nestedResult = payload && typeof payload.result === "object" ? payload.result : {};
+    const nestedResults = nestedResult && Array.isArray(nestedResult.results) ? nestedResult.results : [];
+    const nestedError = nestedResult.error || nestedResult.message;
+    const listError = nestedResults.find((entry) => entry && entry.error);
+    const derivedError = listError ? `${listError.service || "service"}: ${listError.error}` : "";
+    const rawMessage =
+      payload.error ||
+      payload.message ||
+      nestedError ||
+      derivedError ||
+      `${method} ${path} failed (${response.status})`;
+
+    const friendlyMap = {
+      manual_mode_required: "Switch to Manual mode before sending motion commands",
+      robot_not_armed: "Robot is disarmed. Arm motion first.",
+      navigate_to_pose_server_unavailable: "Nav2 NavigateToPose action server is unavailable",
+      nav2_msgs_not_available: "nav2_msgs is missing in this ROS environment",
+      no_active_goal: "No active navigation goal to cancel",
+      service_unavailable: "Required ROS service is unavailable",
+      slam_save_service_unavailable: "SLAM save-map service is unavailable",
+      switch_to_localization_cmd_not_configured: "Localization switch command is not configured",
+      command_not_configured: "Command is not configured",
+    };
+
+    throw new Error(friendlyMap[rawMessage] || rawMessage.replaceAll("_", " "));
   }
   return payload;
 }
@@ -268,11 +305,16 @@ function updateCameraStatus(snapshot) {
   }
 
   const selectedTopic = String(camera.selected_topic || "");
-  setText("cameraTopicLabel", `topic: ${selectedTopic || 'n/a'}`);
-  populateCameraTopics(camera.available_topics || [], selectedTopic);
+  if (state.pendingCameraTopic && selectedTopic === state.pendingCameraTopic) {
+    state.pendingCameraTopic = "";
+  }
+  const displayTopic = state.pendingCameraTopic || selectedTopic;
+  setText("cameraTopicLabel", `topic: ${displayTopic || "n/a"}`);
+  populateCameraTopics(camera.available_topics || [], displayTopic);
 
-  if (selectedTopic && selectedTopic !== state.cameraTopic) {
-    state.cameraTopic = selectedTopic;
+  if (displayTopic && displayTopic !== state.cameraTopic) {
+    state.cameraTopic = displayTopic;
+    writeLocalCameraTopic(displayTopic);
     startCameraStream();
   }
 }
@@ -301,6 +343,38 @@ function populateCameraTopics(topics, selectedTopic) {
 
   if (selectedTopic) {
     select.value = selectedTopic;
+  }
+}
+
+async function applyCameraTopicSelection(topic, showToast = true) {
+  const selectedTopic = String(topic || "").trim();
+  if (!selectedTopic) {
+    return;
+  }
+
+  if (state.cameraApplyInFlight && state.pendingCameraTopic === selectedTopic) {
+    return;
+  }
+
+  state.pendingCameraTopic = selectedTopic;
+  state.cameraApplyInFlight = true;
+  writeLocalCameraTopic(selectedTopic);
+
+  try {
+    await api("/api/camera/select", "POST", { topic: selectedTopic });
+    state.cameraTopic = selectedTopic;
+    startCameraStream();
+    if (showToast) {
+      toast(`Camera topic selected: ${selectedTopic}`);
+    }
+    if (state.ws && state.wsConnected) {
+      state.ws.send(JSON.stringify({ type: "camera_select", topic: selectedTopic }));
+    }
+  } catch (err) {
+    state.pendingCameraTopic = "";
+    throw err;
+  } finally {
+    state.cameraApplyInFlight = false;
   }
 }
 
@@ -487,6 +561,36 @@ function updateModeUi(mode) {
   setText("modeState", mode);
 }
 
+async function applyModeSelection(mode, showToast = true) {
+  const selectedMode = String(mode || "").trim().toLowerCase();
+  if (!selectedMode) {
+    return;
+  }
+
+  if (state.modeApplyInFlight && state.pendingMode === selectedMode) {
+    return;
+  }
+
+  state.pendingMode = selectedMode;
+  state.modeApplyInFlight = true;
+  writeLocalMode(selectedMode);
+  updateModeUi(selectedMode);
+
+  try {
+    await api("/api/mode", "POST", { mode: selectedMode });
+    if (showToast) {
+      toast(`Mode set: ${selectedMode}`);
+    }
+  } catch (err) {
+    state.pendingMode = "";
+    updateModeUi(state.modeFromBackend || "manual");
+    writeLocalMode(state.modeFromBackend || "manual");
+    throw err;
+  } finally {
+    state.modeApplyInFlight = false;
+  }
+}
+
 async function reconcileModeFromLocalStorage(snapshotMode) {
   if (state.reconcileInFlight) {
     return;
@@ -506,9 +610,10 @@ async function reconcileModeFromLocalStorage(snapshotMode) {
 
   state.reconcileInFlight = true;
   try {
-    await api("/api/mode", "POST", { mode: localMode });
+    await applyModeSelection(localMode, false);
     toast(`Mode reconciled from local preference: ${localMode}`);
   } catch (err) {
+    state.pendingMode = "";
     writeLocalMode(snapshotMode);
     toast(`Mode reconcile fallback to backend mode: ${snapshotMode}`, true);
   } finally {
@@ -541,8 +646,11 @@ function renderStatus(snapshot) {
 
   const backendMode = String(snapshot.mode || "manual");
   state.modeFromBackend = backendMode;
-  updateModeUi(backendMode);
-  if (!state.reconcilePending) {
+  if (state.pendingMode && backendMode === state.pendingMode) {
+    state.pendingMode = "";
+  }
+  updateModeUi(state.pendingMode || backendMode);
+  if (!state.reconcilePending && !state.pendingMode) {
     writeLocalMode(backendMode);
   }
 
@@ -642,7 +750,13 @@ async function refreshCameraTopics() {
   populateCameraTopics(out.topics || [], out.selected_topic || "");
   if (out.selected_topic && out.selected_topic !== state.cameraTopic) {
     state.cameraTopic = out.selected_topic;
+    writeLocalCameraTopic(out.selected_topic);
     startCameraStream();
+  }
+
+  const preferredTopic = readLocalCameraTopic();
+  if (preferredTopic && preferredTopic !== out.selected_topic && (out.topics || []).includes(preferredTopic)) {
+    applyCameraTopicSelection(preferredTopic, false).catch(() => {});
   }
 }
 
@@ -662,6 +776,7 @@ function connectWebSocket() {
   ws.onopen = () => {
     state.wsConnected = true;
     state.reconcilePending = true;
+    state.pendingMode = readLocalMode() || state.pendingMode;
     updateWsState();
   };
 
@@ -801,11 +916,15 @@ function bindGeneralEvents() {
     el.addEventListener("click", () => setTab(el.dataset.tab));
   });
 
+  const modeSelect = document.getElementById("modeSelect");
+  modeSelect.addEventListener("change", () => {
+    const mode = modeSelect.value;
+    applyModeSelection(mode, false).catch((err) => toast(err.message, true));
+  });
+
   document.getElementById("setModeBtn").addEventListener("click", async () => {
-    const mode = document.getElementById("modeSelect").value;
-    await api("/api/mode", "POST", { mode });
-    writeLocalMode(mode);
-    toast(`Mode set: ${mode}`);
+    const mode = modeSelect.value;
+    await applyModeSelection(mode, true);
   });
 
   document.getElementById("armBtn").addEventListener("click", async () => {
@@ -839,15 +958,15 @@ function bindGeneralEvents() {
     refreshCameraTopics().catch((err) => toast(err.message, true));
   });
 
+  const cameraTopicSelect = document.getElementById("cameraTopicSelect");
+  cameraTopicSelect.addEventListener("change", () => {
+    const topic = cameraTopicSelect.value;
+    applyCameraTopicSelection(topic, false).catch((err) => toast(err.message, true));
+  });
+
   document.getElementById("cameraSelectBtn").addEventListener("click", async () => {
-    const topic = document.getElementById("cameraTopicSelect").value;
-    await api("/api/camera/select", "POST", { topic });
-    state.cameraTopic = topic;
-    startCameraStream();
-    toast(`Camera topic selected: ${topic}`);
-    if (state.ws && state.wsConnected) {
-      state.ws.send(JSON.stringify({ type: "camera_select", topic }));
-    }
+    const topic = cameraTopicSelect.value;
+    await applyCameraTopicSelection(topic, true);
   });
 
   document.getElementById("stackStartBtn").addEventListener("click", async () => {
@@ -993,6 +1112,12 @@ function bootLocalSelections() {
     if (select) {
       select.value = mode;
     }
+    state.pendingMode = mode;
+  }
+
+  const cameraTopic = readLocalCameraTopic();
+  if (cameraTopic) {
+    state.pendingCameraTopic = cameraTopic;
   }
 
   const tab = readLocalTab();
