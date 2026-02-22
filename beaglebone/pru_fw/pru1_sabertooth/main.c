@@ -55,8 +55,8 @@ volatile register uint32_t __R31;
 
 #define RPMSG_VRING_SIZE 16
 #define RPMSG_NOTIFYID_VDEV 0u
-#define RPMSG_NOTIFYID_VRING0 ((uint32_t)TO_ARM_HOST)
-#define RPMSG_NOTIFYID_VRING1 ((uint32_t)FROM_ARM_HOST)
+#define RPMSG_NOTIFYID_VRING0 1u
+#define RPMSG_NOTIFYID_VRING1 2u
 
 struct my_resource_table {
     struct resource_table base;
