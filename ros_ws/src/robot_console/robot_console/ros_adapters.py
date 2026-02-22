@@ -112,9 +112,12 @@ class RosAdapters:
         self._camera_stream_frames: Dict[str, Dict[str, Any]] = {}
         self._camera_stream_lock = threading.Lock()
 
-        default_stream_topics = topics.get("camera_compressed_topics", [])
-        if not default_stream_topics:
-            default_stream_topics = self._derived_compressed_topics(self._camera_topics)
+        configured_stream_topics = topics.get("camera_compressed_topics", []) or []
+        configured_stream_topics = [
+            topic for topic in configured_stream_topics if self._is_supported_mjpeg_topic(topic)
+        ]
+        derived_stream_topics = self._derived_compressed_topics(self._camera_topics)
+        default_stream_topics = self._unique_topics(configured_stream_topics + derived_stream_topics)
 
         explicit_stream_topic = topics.get("camera_stream_topic", "")
         self._camera_stream_topic = explicit_stream_topic or (default_stream_topics[0] if default_stream_topics else "")
@@ -167,6 +170,25 @@ class RosAdapters:
         self._bank_angular_scale = float(manual_cfg.get("bank_angular_scale", 1.7))
 
     @staticmethod
+    def _is_supported_mjpeg_topic(topic_name: str) -> bool:
+        topic = (topic_name or "").strip()
+        if not topic:
+            return False
+        return "compressedDepth" not in topic
+
+    @staticmethod
+    def _unique_topics(topics: Sequence[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for topic in topics:
+            name = (topic or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            deduped.append(name)
+        return deduped
+
+    @staticmethod
     def _derived_compressed_topics(raw_topics: Sequence[str]) -> List[str]:
         candidates: List[str] = []
         for topic in raw_topics:
@@ -188,7 +210,7 @@ class RosAdapters:
                 continue
             seen.add(topic)
             deduped.append(topic)
-        return deduped
+        return [topic for topic in deduped if RosAdapters._is_supported_mjpeg_topic(topic)]
 
     def _mark_topic(self, key: str) -> None:
         self._rate[key].tick()
@@ -527,20 +549,23 @@ class RosAdapters:
         discovered = []
         try:
             for topic_name, type_names in self._node.get_topic_names_and_types():
-                if "sensor_msgs/msg/CompressedImage" in type_names:
+                if (
+                    "sensor_msgs/msg/CompressedImage" in type_names
+                    and self._is_supported_mjpeg_topic(topic_name)
+                ):
                     discovered.append(topic_name)
         except Exception:
             pass
 
-        combined = list(self._camera_stream_subs.keys()) + discovered
-        deduped: List[str] = []
-        seen = set()
-        for topic in combined:
-            if topic in seen:
-                continue
-            seen.add(topic)
-            deduped.append(topic)
-        return sorted(deduped)
+        for topic in discovered:
+            self.ensure_camera_stream_subscription(topic)
+
+        combined = (
+            list(self._camera_stream_subs.keys())
+            + self._derived_compressed_topics(self._camera_topics)
+            + discovered
+        )
+        return sorted(self._unique_topics(combined))
 
     def camera_stream_topic(self) -> str:
         return self._camera_stream_topic
@@ -570,23 +595,126 @@ class RosAdapters:
                 "data": frame.get("data", b""),
             }
 
-    def camera_stream_status(self) -> Dict[str, Any]:
-        topic = self._camera_stream_topic
-        frame = self.latest_camera_frame()
-        age = None
-        if frame is not None:
-            age = max(0.0, time.time() - frame["stamp_unix"])
-
+    def _camera_topic_metrics(self, topics: Sequence[str]) -> List[Dict[str, Any]]:
+        now = time.time()
         rates = self.topic_rates()
-        topic_rate_key = f"camera_stream:{topic}" if topic else ""
+        metrics: List[Dict[str, Any]] = []
+
+        with self._camera_stream_lock:
+            frames = dict(self._camera_stream_frames)
+
+        for topic in topics:
+            stamp = None
+            frame = frames.get(topic)
+            if frame is not None:
+                stamp = float(frame.get("stamp_unix", 0.0))
+
+            age = None
+            if stamp is not None and stamp > 0.0:
+                age = max(0.0, now - stamp)
+
+            fps_key = f"camera_stream:{topic}"
+            fps = rates.get(fps_key, 0.0)
+            connected = age is not None and age < 2.0
+
+            metrics.append(
+                {
+                    "topic": topic,
+                    "fps": fps,
+                    "age_sec": age,
+                    "connected": connected,
+                    "format": frame.get("format") if frame else None,
+                }
+            )
+
+        return metrics
+
+    def _auto_select_camera_topic(self, metrics: Sequence[Dict[str, Any]]) -> None:
+        selected = self._camera_stream_topic
+        selected_metric = None
+        for metric in metrics:
+            if metric.get("topic") == selected:
+                selected_metric = metric
+                break
+
+        if selected_metric and selected_metric.get("connected"):
+            return
+
+        connected_topics = [metric for metric in metrics if metric.get("connected")]
+        if not connected_topics:
+            return
+
+        # Prefer highest observed FPS among connected topics.
+        connected_topics.sort(key=lambda item: float(item.get("fps", 0.0)), reverse=True)
+        best_topic = str(connected_topics[0].get("topic", "")).strip()
+        if best_topic:
+            self._camera_stream_topic = best_topic
+
+    def camera_stream_status(self) -> Dict[str, Any]:
+        available_topics = self.camera_stream_topics()
+        topic_metrics = self._camera_topic_metrics(available_topics)
+        self._auto_select_camera_topic(topic_metrics)
+        topic = self._camera_stream_topic
+
+        selected_metric = None
+        for metric in topic_metrics:
+            if metric.get("topic") == topic:
+                selected_metric = metric
+                break
+
+        if selected_metric is None:
+            selected_metric = {
+                "fps": 0.0,
+                "age_sec": None,
+                "connected": False,
+                "format": None,
+            }
 
         return {
             "selected_topic": topic,
-            "available_topics": self.camera_stream_topics(),
-            "fps": rates.get(topic_rate_key, 0.0) if topic_rate_key else 0.0,
-            "age_sec": age,
-            "connected": frame is not None and age is not None and age < 2.0,
-            "format": frame.get("format") if frame else None,
+            "available_topics": available_topics,
+            "topic_metrics": topic_metrics,
+            "fps": selected_metric.get("fps", 0.0),
+            "age_sec": selected_metric.get("age_sec"),
+            "connected": selected_metric.get("connected", False),
+            "format": selected_metric.get("format"),
+        }
+
+    @staticmethod
+    def _service_ready(client: Any) -> bool:
+        if client is None:
+            return False
+        try:
+            return bool(client.service_is_ready())
+        except Exception:
+            return False
+
+    def capabilities(self) -> Dict[str, bool]:
+        nav_msgs_available = NavigateToPose is not None and self._nav_client is not None
+        nav_server_ready = False
+        if nav_msgs_available:
+            try:
+                nav_server_ready = bool(self._nav_client.server_is_ready())
+            except Exception:
+                nav_server_ready = False
+
+        with self._lock:
+            nav_cancel = self._nav_goal_handle is not None
+
+        slam_start_stop = self._service_ready(self._slam_resume_client) and self._service_ready(
+            self._slam_pause_client
+        )
+        slam_save = SaveMap is not None and self._service_ready(self._slam_save_client)
+        clear_costmaps = all(self._service_ready(client) for client in self._clear_costmap_clients)
+
+        return {
+            "nav_msgs_available": nav_msgs_available,
+            "nav_server_ready": nav_server_ready,
+            "nav_goal": nav_msgs_available and nav_server_ready,
+            "nav_cancel": nav_cancel,
+            "clear_costmaps": clear_costmaps,
+            "slam_start_stop": slam_start_stop,
+            "slam_save": slam_save,
         }
 
     def _on_nav_feedback(self, feedback_msg: Any) -> None:

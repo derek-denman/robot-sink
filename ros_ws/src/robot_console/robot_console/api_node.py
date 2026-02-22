@@ -3,6 +3,7 @@ import contextlib
 import copy
 import json
 import os
+import shlex
 import signal
 import subprocess
 import threading
@@ -221,6 +222,10 @@ class RobotConsoleApiNode(Node):
 
         scan_status = self.adapters.scan_stream_status()
         camera_status = self.adapters.camera_stream_status()
+        adapter_caps = self.adapters.capabilities()
+        switch_localization_cmd = (
+            self._config.get("mapping", {}).get("switch_to_localization_cmd", "").strip()
+        )
 
         return {
             "timestamp_unix": time.time(),
@@ -250,6 +255,41 @@ class RobotConsoleApiNode(Node):
             },
             "connection": {
                 "ws_clients": len(self._ws_clients),
+            },
+            "capabilities": {
+                "stack_start": self.stack_command_available("start_cmd"),
+                "stack_stop": self.stack_command_available("stop_cmd"),
+                "mapping_start_stop": adapter_caps.get("slam_start_stop", False),
+                "mapping_save": adapter_caps.get("slam_save", False),
+                "switch_localization": bool(switch_localization_cmd),
+                "nav_goal": adapter_caps.get("nav_goal", False),
+                "nav_cancel": adapter_caps.get("nav_cancel", False),
+                "clear_costmaps": adapter_caps.get("clear_costmaps", False),
+                "camera_stream_connected": camera_status.get("connected", False),
+                "stack_start_reason": "" if self.stack_command_available("start_cmd") else "stack_start_not_available",
+                "stack_stop_reason": "" if self.stack_command_available("stop_cmd") else "stack_stop_not_available",
+                "mapping_start_stop_reason": ""
+                if adapter_caps.get("slam_start_stop", False)
+                else "slam_services_unavailable",
+                "mapping_save_reason": ""
+                if adapter_caps.get("slam_save", False)
+                else "slam_save_unavailable",
+                "switch_localization_reason": ""
+                if switch_localization_cmd
+                else "switch_to_localization_cmd_not_configured",
+                "nav_goal_reason": ""
+                if adapter_caps.get("nav_goal", False)
+                else (
+                    "nav2_msgs_not_available"
+                    if not adapter_caps.get("nav_msgs_available", False)
+                    else "navigate_to_pose_server_unavailable"
+                ),
+                "nav_cancel_reason": ""
+                if adapter_caps.get("nav_cancel", False)
+                else "no_active_goal",
+                "clear_costmaps_reason": ""
+                if adapter_caps.get("clear_costmaps", False)
+                else "clear_costmap_services_unavailable",
             },
             "foxglove": {
                 "port": self._config.get("foxglove", {}).get("port", 8765),
@@ -356,14 +396,28 @@ class RobotConsoleApiNode(Node):
         }
 
     def run_stack_command(self, command_key: str, background: bool = False) -> Dict[str, Any]:
-        cmd = self._config.get("stack", {}).get(command_key, "").strip()
+        cmd = self._config.get("stack", {}).get(command_key, "").strip() or self._default_stack_command(
+            command_key
+        )
         if not cmd:
-            return {
-                "ok": False,
-                "error": f"stack_{command_key}_not_configured",
-            }
+            return {"ok": False, "error": f"stack_{command_key}_not_configured"}
 
         return self.run_shell_command(cmd, background=background)
+
+    def stack_command_available(self, command_key: str) -> bool:
+        cmd = self._config.get("stack", {}).get(command_key, "").strip() or self._default_stack_command(
+            command_key
+        )
+        return bool(cmd)
+
+    def _default_stack_command(self, command_key: str) -> str:
+        robot_root = os.environ.get("ROBOT_ROOT", str(Path.cwd()))
+        root_q = shlex.quote(robot_root)
+        if command_key == "start_cmd":
+            return f"pgrep -f '[j]etson/scripts/run_stack.sh' >/dev/null || (cd {root_q} && ./jetson/scripts/run_stack.sh)"
+        if command_key == "stop_cmd":
+            return "pkill -f '[j]etson/scripts/run_stack.sh' || true"
+        return ""
 
     def run_commissioning_check(self, check_id: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -847,7 +901,7 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         return _app_response(result.get("ok", False), result=result)
 
     async def stack_stop(_request: web.Request) -> web.Response:
-        result = node.run_stack_command("stop_cmd", background=False)
+        result = node.run_stack_command("stop_cmd", background=True)
         return _app_response(result.get("ok", False), result=result)
 
     async def ws_handler(request: web.Request) -> web.StreamResponse:

@@ -430,6 +430,13 @@ a:hover {
   transition: transform 110ms ease;
 }
 
+button:disabled,
+button.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 button.accent {
   background: var(--accent);
   border-color: var(--accent);

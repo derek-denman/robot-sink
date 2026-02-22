@@ -110,6 +110,13 @@ async function api(path, method = "POST", body = undefined) {
       command_not_configured: "Command is not configured",
     };
 
+    if (rawMessage.includes("clear_costmap") && rawMessage.includes("service_unavailable")) {
+      throw new Error("Clear costmap service unavailable");
+    }
+    if (rawMessage.includes("service_unavailable")) {
+      throw new Error("Required ROS service unavailable");
+    }
+
     throw new Error(friendlyMap[rawMessage] || rawMessage.replaceAll("_", " "));
   }
   return payload;
@@ -203,6 +210,41 @@ function updateFoxgloveLink(port) {
   if (link) {
     link.href = webUrl;
   }
+}
+
+function setButtonAvailability(id, enabled, reason = "") {
+  const button = document.getElementById(id);
+  if (!button) {
+    return;
+  }
+  button.disabled = !enabled;
+  button.classList.toggle("disabled", !enabled);
+  button.title = !enabled && reason ? reason : "";
+}
+
+function renderCapabilities(capabilities) {
+  const caps = capabilities || {};
+  setButtonAvailability("stackStartBtn", caps.stack_start !== false, caps.stack_start_reason || "");
+  setButtonAvailability("stackStopBtn", caps.stack_stop !== false, caps.stack_stop_reason || "");
+  setButtonAvailability(
+    "slamStartBtn",
+    caps.mapping_start_stop !== false,
+    caps.mapping_start_stop_reason || "SLAM services unavailable",
+  );
+  setButtonAvailability(
+    "slamStopBtn",
+    caps.mapping_start_stop !== false,
+    caps.mapping_start_stop_reason || "SLAM services unavailable",
+  );
+  setButtonAvailability("saveMapBtn", caps.mapping_save !== false, caps.mapping_save_reason || "");
+  setButtonAvailability(
+    "switchLocalizationBtn",
+    caps.switch_localization !== false,
+    caps.switch_localization_reason || "",
+  );
+  setButtonAvailability("sendGoalBtn", caps.nav_goal !== false, caps.nav_goal_reason || "");
+  setButtonAvailability("cancelGoalBtn", caps.nav_cancel !== false, caps.nav_cancel_reason || "");
+  setButtonAvailability("clearCostmapsBtn", caps.clear_costmaps !== false, caps.clear_costmaps_reason || "");
 }
 
 function setTab(tabName) {
@@ -704,6 +746,7 @@ function renderStatus(snapshot) {
   updateScanStatus(snapshot);
   updateCameraStatus(snapshot);
   updateFoxgloveLink(snapshot.foxglove && snapshot.foxglove.port);
+  renderCapabilities(snapshot.capabilities || {});
 
   if (state.reconcilePending) {
     reconcileModeFromLocalStorage(backendMode).catch(() => {});

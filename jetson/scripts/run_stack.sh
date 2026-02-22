@@ -60,6 +60,7 @@ fi
 
 PIDS=()
 NAMES=()
+CMDS=()
 
 start_cmd() {
   local name="$1"
@@ -72,6 +73,7 @@ start_cmd() {
   local pid="$!"
   PIDS+=("${pid}")
   NAMES+=("${name}")
+  CMDS+=("${cmd}")
 }
 
 cleanup() {
@@ -86,6 +88,18 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+
+is_critical_process() {
+  local name="$1"
+  case "${name}" in
+    robot-console|foxglove)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 ros_pkg_exists() {
   local pkg="$1"
@@ -150,8 +164,15 @@ while true; do
     pid="${PIDS[$idx]}"
     name="${NAMES[$idx]}"
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
-      log "Process exited unexpectedly: ${name} (pid ${pid})"
-      exit 1
+      if is_critical_process "${name}"; then
+        log "Critical process exited unexpectedly: ${name} (pid ${pid})"
+        exit 1
+      fi
+
+      log "Optional process exited: ${name} (pid ${pid}); keeping core stack alive."
+      unset 'PIDS[idx]'
+      unset 'NAMES[idx]'
+      unset 'CMDS[idx]'
     fi
   done
   sleep 2
