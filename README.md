@@ -89,8 +89,10 @@ Robot Console is hosted on the Jetson and served by the `robot_console` ROS back
 
 - Open from Mac/Linux/Windows browser: `http://JETSON_IP:8080`
 - Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
-- Built-in visualizer: live lidar canvas + OAK-D MJPEG stream
+- Built-in visualizer: live lidar canvas + OAK-D MJPEG stream + FPS/age status
 - Foxglove bridge: `ws://JETSON_IP:8765`
+- UI source: `jetson/console/ui/` (React + TypeScript + Ant Design)
+- Runtime assets served from: `jetson/console/web/`
 
 If Foxglove Web blocks insecure websocket connections, use Foxglove Desktop or tunnel from your Mac:
 
