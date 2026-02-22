@@ -83,7 +83,26 @@ cd ~/robot-sink
 ./jetson/scripts/run_stack.sh
 ```
 
-### 5) Optional boot-time service
+### 5) Control UI (Robot Console)
+
+Robot Console is hosted on the Jetson and served by the `robot_console` ROS backend.
+
+- Open from Mac/Linux/Windows browser: `http://JETSON_IP:8080`
+- Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
+- Built-in visualizer: live lidar canvas + OAK-D MJPEG stream
+- Foxglove bridge: `ws://JETSON_IP:8765`
+
+If Foxglove Web blocks insecure websocket connections, use Foxglove Desktop or tunnel from your Mac:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 jetson@JETSON_IP
+```
+
+Then connect Foxglove to `ws://localhost:8765`.
+
+See `jetson/console/README.md` for controls, configuration, and troubleshooting.
+
+### 6) Optional boot-time service
 
 ```bash
 ./jetson/scripts/enable_services.sh --user ubuntu --now
@@ -130,6 +149,7 @@ Top-level docs pointer:
 │   └── scripts/
 ├── jetson/
 │   ├── README.md
+│   ├── console/
 │   ├── docs/
 │   ├── scripts/
 │   ├── systemd/

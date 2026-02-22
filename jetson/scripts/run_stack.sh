@@ -31,6 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${JETSON_LOG_DIR:-${REPO_ROOT}/jetson/logs}"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
+export ROBOT_ROOT="${ROBOT_ROOT:-${REPO_ROOT}}"
+ROBOT_CONSOLE_CONFIG="${ROBOT_CONSOLE_CONFIG:-${ROBOT_ROOT}/jetson/console/console_config.yaml}"
+ROBOT_CONSOLE_WEB_ROOT="${ROBOT_CONSOLE_WEB_ROOT:-${ROBOT_ROOT}/jetson/console/web}"
+FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
+export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT
 
 mkdir -p "${LOG_DIR}"
 
@@ -55,6 +60,7 @@ fi
 
 PIDS=()
 NAMES=()
+CMDS=()
 
 start_cmd() {
   local name="$1"
@@ -67,6 +73,16 @@ start_cmd() {
   local pid="$!"
   PIDS+=("${pid}")
   NAMES+=("${name}")
+  CMDS+=("${cmd}")
+}
+
+retry_loop_cmd() {
+  local name="$1"
+  local inner_cmd="$2"
+  local retry_delay="${3:-3}"
+
+  printf 'while true; do %s; rc=$?; echo "[%s] %s exited rc=${rc}; retrying in %ss"; sleep %s; done' \
+    "${inner_cmd}" "${SCRIPT_NAME}" "${name}" "${retry_delay}" "${retry_delay}"
 }
 
 cleanup() {
@@ -82,15 +98,45 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+is_critical_process() {
+  local name="$1"
+  case "${name}" in
+    robot-console|foxglove)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 ros_pkg_exists() {
   local pkg="$1"
   command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix "${pkg}" >/dev/null 2>&1
 }
 
+if [[ -n "${FOXGLOVE_CMD:-}" ]]; then
+  start_cmd "foxglove" "${FOXGLOVE_CMD}"
+elif ros_pkg_exists foxglove_bridge; then
+  start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+else
+  start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove_bridge not found; bridge unavailable'"
+fi
+
+if [[ -n "${ROBOT_CONSOLE_CMD:-}" ]]; then
+  start_cmd "robot-console" "${ROBOT_CONSOLE_CMD}"
+elif ros_pkg_exists robot_console; then
+  start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+elif [[ -d "${ROBOT_ROOT}/ros_ws/src/robot_console/robot_console" ]]; then
+  start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
+else
+  start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot_console package missing; build ros_ws first'"
+fi
+
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
 elif ros_pkg_exists depthai_ros_driver; then
-  start_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py"
+  start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
 else
   start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver not found; running stub'"
 fi
@@ -98,7 +144,7 @@ fi
 if [[ -n "${RPLIDAR_LAUNCH_CMD:-}" ]]; then
   start_cmd "rplidar" "${RPLIDAR_LAUNCH_CMD}"
 elif ros_pkg_exists rplidar_ros; then
-  start_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser"
+  start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
 else
   start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --check-device /dev/ttyRPLIDAR --hint 'rplidar_ros not found; running stub'"
 fi
@@ -127,8 +173,15 @@ while true; do
     pid="${PIDS[$idx]}"
     name="${NAMES[$idx]}"
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
-      log "Process exited unexpectedly: ${name} (pid ${pid})"
-      exit 1
+      if is_critical_process "${name}"; then
+        log "Critical process exited unexpectedly: ${name} (pid ${pid})"
+        exit 1
+      fi
+
+      log "Optional process exited: ${name} (pid ${pid}); keeping core stack alive."
+      unset 'PIDS[idx]'
+      unset 'NAMES[idx]'
+      unset 'CMDS[idx]'
     fi
   done
   sleep 2

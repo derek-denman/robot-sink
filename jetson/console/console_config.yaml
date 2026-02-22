@@ -1,0 +1,66 @@
+server:
+  host: 0.0.0.0
+  http_port: 8080
+  websocket_path: /ws
+
+foxglove:
+  port: 8765
+
+safety:
+  command_timeout_sec: 0.8
+
+streaming:
+  scan_push_hz: 8.0
+  camera_stream_hz: 12.0
+
+manual_control:
+  bank_linear_scale: 0.8
+  bank_angular_scale: 1.7
+
+topics:
+  cmd_vel: /cmd_vel
+  scan: /scan
+  odom: /odom
+  tf: /tf
+  tf_static: /tf_static
+  camera_topics:
+    - /oak/rgb/image_raw
+    - /oak/stereo/image_raw
+  camera_compressed_topics:
+    - /oak/rgb/image_rect/compressed
+    - /oak/rgb/image_raw/compressed
+  camera_stream_topic: /oak/rgb/image_rect/compressed
+  navigate_to_pose: /navigate_to_pose
+  initial_pose: /initialpose
+  slam_pause: /slam_toolbox/pause_new_measurements
+  slam_resume: /slam_toolbox/resume
+  slam_save_map: /slam_toolbox/save_map
+  clear_costmap_local: /local_costmap/clear_entirely_local_costmap
+  clear_costmap_global: /global_costmap/clear_entirely_global_costmap
+  arm_gripper: /arm/gripper_cmd
+  arm_pose: /arm/pose_cmd
+  arm_joint_jog: /arm/joint_jog
+  arm_joints: /arm/joints_cmd
+  arm_stop: /arm/stop
+
+bagging:
+  storage_path: ~/robot-sink/data/bags
+  default_topics:
+    - /cmd_vel
+    - /odom
+    - /scan
+    - /tf
+    - /tf_static
+    - /oak/rgb/image_raw
+
+stack:
+  start_cmd: ""
+  stop_cmd: ""
+
+mapping:
+  start_cmd: ""
+  stop_cmd: ""
+  switch_to_localization_cmd: ""
+
+reliability:
+  temp_paths: []

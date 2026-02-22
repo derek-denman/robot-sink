@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot Console</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Robot Console</h1>
+      <p>Jetson-hosted control, diagnostics, and workflow runtime</p>
+    </div>
+    <div class="top-controls">
+      <div class="chip">
+        <span>Backend</span>
+        <strong id="wsState" class="warn">connecting</strong>
+      </div>
+      <div class="chip">
+        <span>Last Update</span>
+        <strong id="lastUpdateState" class="warn">never</strong>
+      </div>
+      <div class="mode-panel">
+        <label for="modeSelect">Mode</label>
+        <div class="mode-row">
+          <select id="modeSelect">
+            <option value="manual">Manual</option>
+            <option value="commissioning">Commissioning</option>
+            <option value="mapping">Mapping</option>
+            <option value="nav">Nav</option>
+            <option value="pickplace">PickPlace</option>
+            <option value="training">Training</option>
+            <option value="reliability">Reliability</option>
+            <option value="demo">Demo</option>
+          </select>
+          <button id="setModeBtn">Apply</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section class="statusbar">
+    <div class="status-chip"><span>Mode</span><strong id="modeState">manual</strong></div>
+    <div class="status-chip"><span>Safety</span><strong id="safetyState">DISARMED</strong></div>
+    <div class="status-chip"><span>E-stop</span><strong id="estopState">CLEAR</strong></div>
+    <div class="status-chip"><span>Watchdog</span><strong id="watchdogState">Idle</strong></div>
+    <div class="status-chip"><span>Health</span><strong id="healthState">Unknown</strong></div>
+    <div class="status-chip"><span>Base Link</span><strong id="baseState">Unknown</strong></div>
+    <div class="status-chip"><span>Bag</span><strong id="bagState">Stopped</strong></div>
+    <div class="status-actions">
+      <button id="armBtn">Arm</button>
+      <button id="disarmBtn">Disarm</button>
+      <button class="danger" id="estopBtn">E-Stop</button>
+      <button id="resetEstopBtn">Reset E-Stop</button>
+      <button class="danger" id="stopAllBtn">Stop All</button>
+    </div>
+  </section>
+
+  <section class="visualizer-card">
+    <div class="visualizer-head">
+      <h2>Live Visualizer</h2>
+      <p>Built-in scan and camera streams. For full 3D/TF panels, open Foxglove with the Jetson bridge.</p>
+    </div>
+    <div class="visualizer-grid">
+      <article class="viz-panel">
+        <div class="panel-head">
+          <h3>Lidar Scan</h3>
+          <div class="mini-stats">
+            <span id="scanStatus" class="warn">Disconnected</span>
+            <span id="scanFps">0.0 Hz</span>
+            <span id="scanAge">age n/a</span>
+          </div>
+        </div>
+        <canvas id="scanCanvas" width="520" height="340"></canvas>
+      </article>
+
+      <article class="viz-panel">
+        <div class="panel-head">
+          <h3>OAK-D Stream</h3>
+          <div class="mini-stats">
+            <span id="cameraStatus" class="warn">Disconnected</span>
+            <span id="cameraFps">0.0 Hz</span>
+            <span id="cameraAge">age n/a</span>
+          </div>
+        </div>
+        <div class="camera-controls">
+          <label for="cameraTopicSelect">Camera topic</label>
+          <select id="cameraTopicSelect"></select>
+          <button id="cameraSelectBtn">Select</button>
+          <button id="cameraRefreshTopicsBtn">Refresh Topics</button>
+        </div>
+        <div class="camera-wrap">
+          <img id="cameraStreamImg" alt="Camera stream" />
+          <div class="camera-overlay" id="cameraTopicLabel">topic: n/a</div>
+        </div>
+      </article>
+    </div>
+
+    <div class="foxglove-row">
+      <div>
+        <strong>Foxglove bridge:</strong>
+        <code id="foxgloveWs">ws://&lt;jetson&gt;:8765</code>
+      </div>
+      <div class="fox-actions">
+        <a id="foxgloveWebLink" href="#" target="_blank" rel="noopener">Open Foxglove Web</a>
+        <a href="/layouts/foxglove_layout.json" target="_blank" rel="noopener">Default Layout JSON</a>
+      </div>
+    </div>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="commissioning">Commissioning</button>
+    <button class="tab" data-tab="manual">Manual Control</button>
+    <button class="tab" data-tab="mapping">Mapping & Localization</button>
+    <button class="tab" data-tab="navigation">Navigation</button>
+    <button class="tab" data-tab="pickplace">Pick & Place</button>
+    <button class="tab" data-tab="training">Training / Data</button>
+    <button class="tab" data-tab="reliability">Reliability / Demo</button>
+  </nav>
+
+  <main>
+    <section class="panel active" id="tab-dashboard">
+      <h3>Dashboard</h3>
+      <div class="grid tiles">
+        <article><h4>Base Connected</h4><p id="tileBase">Unknown</p></article>
+        <article><h4>Last Encoder Update</h4><p id="tileEncoder">n/a</p></article>
+        <article><h4>Lidar Rate</h4><p id="tileLidar">0.0 Hz</p></article>
+        <article><h4>OAK Topic Rate</h4><p id="tileOak">0.0 Hz</p></article>
+        <article><h4>Nav State</h4><p id="tileNav">idle</p></article>
+        <article><h4>Temps</h4><p id="tileTemps">n/a</p></article>
+      </div>
+      <div class="actions">
+        <button id="stackStartBtn">Start Stack</button>
+        <button id="stackStopBtn">Stop Stack</button>
+      </div>
+      <div class="actions">
+        <input id="recordTagInput" placeholder="recording tags (example: bench-smoke)">
+        <button id="recordStartBtn">Start Recording</button>
+        <button id="recordStopBtn">Stop Recording</button>
+      </div>
+    </section>
+
+    <section class="panel" id="tab-commissioning">
+      <h3>Commissioning Checklist</h3>
+      <div class="checklist">
+        <div class="check-row">
+          <span>Encoder direction test</span>
+          <button data-check="encoder_direction">Run</button>
+          <small id="check-encoder_direction">Pending</small>
+        </div>
+        <div class="check-row">
+          <span>Motor tick test</span>
+          <button data-check="motor_tick">Run</button>
+          <small id="check-motor_tick">Pending</small>
+        </div>
+        <div class="check-row">
+          <span>E-stop test</span>
+          <button data-check="estop">Run</button>
+          <small id="check-estop">Pending</small>
+        </div>
+        <div class="check-row">
+          <span>Watchdog test</span>
+          <button data-check="watchdog">Run</button>
+          <small id="check-watchdog">Pending</small>
+        </div>
+        <div class="check-row">
+          <span>TF sanity (map/odom/base_link)</span>
+          <button data-check="tf_sanity">Run</button>
+          <small id="check-tf_sanity">Pending</small>
+        </div>
+        <div class="check-row">
+          <span>Mode persistence (refresh + reconnect)</span>
+          <button data-check="mode_persistence_manual">Mark Verified</button>
+          <small id="check-mode_persistence_manual">Pending</small>
+        </div>
+      </div>
+      <p class="note">Manual proof: pick a non-default mode, refresh browser, then restart network/WS and confirm mode is retained and reconciled.</p>
+    </section>
+
+    <section class="panel" id="tab-manual">
+      <h3>Manual Control</h3>
+      <div class="grid two">
+        <article>
+          <h4>Motion Gating</h4>
+          <p>Robot starts disarmed. Enable motion before directional or motor-bank commands.</p>
+          <div class="actions">
+            <button id="deadmanToggleBtn" class="accent">Enable Motion (5s)</button>
+            <span id="deadmanState">disabled</span>
+            <span id="deadmanCountdown">0.0s</span>
+          </div>
+          <label for="speedSlider">Direction speed limit</label>
+          <input id="speedSlider" type="range" min="0.05" max="1.0" step="0.05" value="0.30">
+          <p id="speedLabel">0.30 m/s</p>
+        </article>
+
+        <article>
+          <h4>Direction Buttons (Hold)</h4>
+          <p>Press and hold. Release immediately sends stop.</p>
+          <div class="teleop-pad">
+            <button data-drive="forward">Forward</button>
+            <button data-drive="left">Left</button>
+            <button data-drive="stop" class="danger">Stop</button>
+            <button data-drive="right">Right</button>
+            <button data-drive="reverse">Backward</button>
+          </div>
+        </article>
+      </div>
+
+      <div class="grid two top-gap">
+        <article>
+          <h4>Motor Bank</h4>
+          <p>Independent bank control. Range is -100..100 and requires motion enabled.</p>
+          <div class="slider-group">
+            <label for="leftBankSlider">Left bank <strong id="leftBankValue">0</strong></label>
+            <input id="leftBankSlider" type="range" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-group">
+            <label for="rightBankSlider">Right bank <strong id="rightBankValue">0</strong></label>
+            <input id="rightBankSlider" type="range" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="actions">
+            <button id="sendMotorBankBtn">Send Bank Command</button>
+            <button id="centerMotorBankBtn">Center Sliders + Stop</button>
+          </div>
+        </article>
+
+        <article>
+          <h4>Arm Control</h4>
+          <p>Joint sliders publish absolute setpoints via <code>/api/arm/joints</code>.</p>
+          <div class="joint-grid" id="jointGrid">
+            <div class="joint-row"><label for="joint-j1">j1</label><input id="joint-j1" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j1-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j2">j2</label><input id="joint-j2" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j2-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j3">j3</label><input id="joint-j3" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j3-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j4">j4</label><input id="joint-j4" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j4-val">0.00</span></div>
+            <div class="joint-row"><label for="joint-j5">j5</label><input id="joint-j5" type="range" min="-3.14" max="3.14" step="0.01" value="0"><span id="joint-j5-val">0.00</span></div>
+          </div>
+          <div class="actions">
+            <button id="sendJointsBtn">Send Joints</button>
+            <button id="armStopBtn" class="danger">Stop Arm</button>
+          </div>
+          <div class="actions">
+            <button class="pose-btn" data-pose="stow">Stow</button>
+            <button class="pose-btn" data-pose="ready">Ready</button>
+            <button class="pose-btn" data-pose="pregrasp">Pregrasp</button>
+            <button class="pose-btn" data-pose="drop">Drop</button>
+          </div>
+          <div class="actions">
+            <button id="gripperOpenBtn">Gripper Open</button>
+            <button id="gripperCloseBtn">Gripper Close</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" id="tab-mapping">
+      <h3>Mapping & Localization</h3>
+      <div class="actions">
+        <button id="slamStartBtn">Start SLAM Toolbox</button>
+        <button id="slamStopBtn">Stop SLAM Toolbox</button>
+      </div>
+      <div class="actions">
+        <input id="mapNameInput" placeholder="map filename (without extension)" value="living_room_map">
+        <button id="saveMapBtn">Save Map</button>
+        <span id="savedMapLabel">Last map: none</span>
+      </div>
+      <div class="actions">
+        <button id="switchLocalizationBtn">Switch to Localization (AMCL)</button>
+      </div>
+      <h4>Set Initial Pose</h4>
+      <div class="actions">
+        <input id="initX" type="number" step="0.1" value="0.0">
+        <input id="initY" type="number" step="0.1" value="0.0">
+        <input id="initYaw" type="number" step="0.1" value="0.0">
+        <button id="setInitialPoseBtn">Set Initial Pose</button>
+      </div>
+    </section>
+
+    <section class="panel" id="tab-navigation">
+      <h3>Navigation</h3>
+      <div class="actions">
+        <input id="goalX" type="number" step="0.1" placeholder="x" value="0.0">
+        <input id="goalY" type="number" step="0.1" placeholder="y" value="0.0">
+        <input id="goalYaw" type="number" step="0.1" placeholder="yaw" value="0.0">
+        <button id="sendGoalBtn">Send Goal</button>
+      </div>
+      <p>Nav state: <strong id="navStateLabel">idle</strong> | Last result: <strong id="navResultLabel">none</strong></p>
+      <div class="actions">
+        <button id="cancelGoalBtn">Cancel Goal</button>
+        <button id="clearCostmapsBtn">Clear Costmaps</button>
+      </div>
+    </section>
+
+    <section class="panel" id="tab-pickplace">
+      <h3>Pick & Place</h3>
+      <p>Current stage: <strong id="pickStage">idle</strong> | Retries: <strong id="pickRetries">0</strong></p>
+      <p>Last target: <strong id="pickTarget">none</strong></p>
+      <div class="actions">
+        <button id="pickStartBtn">Start Task Loop</button>
+        <button id="pickStopBtn">Stop Task Loop</button>
+      </div>
+      <div class="actions">
+        <button id="pickSkipBtn">Skip</button>
+        <button id="pickRetryBtn">Retry Grasp</button>
+        <button id="pickAbortBtn" class="danger">Abort</button>
+      </div>
+    </section>
+
+    <section class="panel" id="tab-training">
+      <h3>Training / Data</h3>
+      <div class="actions">
+        <input id="trainTagsInput" placeholder="training tags">
+        <button id="trainRecordStartBtn">Start Bag</button>
+        <button id="trainRecordStopBtn">Stop Bag</button>
+      </div>
+      <button id="refreshRecordingsBtn">Refresh Recordings</button>
+      <ul id="recordingsList"></ul>
+      <div class="actions">
+        <input id="replayPathInput" placeholder="/path/to/bag">
+        <button id="replayHintBtn">Replay Bag Command</button>
+      </div>
+      <pre id="replayHintOutput"></pre>
+    </section>
+
+    <section class="panel" id="tab-reliability">
+      <h3>Reliability / Demo</h3>
+      <div class="grid two">
+        <article>
+          <h4>Reliability Dashboard</h4>
+          <pre id="reliabilityOutput">waiting for telemetry...</pre>
+        </article>
+        <article>
+          <h4>Demo Run</h4>
+          <div class="actions">
+            <input id="demoCountInput" type="number" min="1" value="5">
+            <button id="demoRunBtn">Run N Toys</button>
+            <button id="demoStopBtn">Stop Demo</button>
+          </div>
+          <p>Progress: <strong id="demoProgress">0 / 0</strong></p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer id="toast"></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

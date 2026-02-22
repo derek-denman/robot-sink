@@ -44,6 +44,11 @@ if getent group dialout >/dev/null 2>&1; then
   run_sudo usermod -aG dialout "${SUDO_USER:-${USER}}"
 fi
 
+if getent group plugdev >/dev/null 2>&1; then
+  log "Ensuring current user is in plugdev group"
+  run_sudo usermod -aG plugdev "${SUDO_USER:-${USER}}"
+fi
+
 log "Reloading udev rules"
 run_sudo udevadm control --reload-rules
 run_sudo udevadm trigger

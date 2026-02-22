@@ -17,3 +17,7 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", GROUP="dial
 # If both devices report the same ID_MODEL, pin by serial instead:
 #   ATTRS{serial}=="<lidar-serial>"  -> ttyRPLIDAR
 #   ATTRS{serial}=="<roarm-serial>"  -> ttyROARM
+
+# OAK-D Lite / Movidius XLink devices (DepthAI boot + runtime access).
+# Without this, depthai_ros_driver can see the USB device but fails to boot it.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666", GROUP="plugdev", TAG+="uaccess"
