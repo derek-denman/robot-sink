@@ -54,10 +54,14 @@ ros2 launch slam_toolbox online_async_launch.py
 Run Nav2 (navigation):
 
 ```bash
+mkdir -p "$HOME/robot-sink/ros_ws/src/nav2_config"
+cp /opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml \
+  "$HOME/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml"
+
 source /opt/ros/humble/setup.bash
 ros2 launch nav2_bringup navigation_launch.py \
   use_sim_time:=false \
-  params_file:=~/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
+  params_file:=$HOME/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
 ```
 
 Verify availability:
