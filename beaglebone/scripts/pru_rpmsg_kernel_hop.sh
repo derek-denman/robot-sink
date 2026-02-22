@@ -137,6 +137,11 @@ kernel_version_newer_than() {
   [[ "$(printf '%s\n%s\n' "${current}" "${candidate}" | LC_ALL=C sort -V | tail -n 1)" == "${candidate}" ]]
 }
 
+kernel_is_6_1_ti() {
+  local kernel="$1"
+  [[ "${kernel}" =~ ^6\.1\..*-ti- ]]
+}
+
 detect_kick_oops_signature() {
   local hints
 
@@ -152,7 +157,7 @@ detect_vring_irq_missing_signature() {
   local hints
 
   hints="$(dmesg -T | egrep -i 'remoteproc|rproc-virtio|pru|rpmsg|oops|segfault|bug' | tail -n 160 || true)"
-  if printf '%s\n' "${hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|boot failed: -6'; then
+  if printf '%s\n' "${hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|irq kick not found|unable to get kick interrupt|boot failed: -6'; then
     return 0
   fi
 
@@ -236,6 +241,7 @@ validate_overlay_for_kernel() {
 build_plan() {
   local running selected_kernel selected_overlay effective_kernel candidate_kernel
   local best_overlay chosen_kernel chosen_overlay
+  local prefer_non_61_ti
 
   running="$(uname -r)"
   selected_kernel="$(get_uenv_key uname_r)"
@@ -252,6 +258,11 @@ build_plan() {
     VRING_IRQ_MISSING_DETECTED=1
   fi
 
+  prefer_non_61_ti=0
+  if [[ ${KICK_OOPS_DETECTED} -eq 1 || ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
+    prefer_non_61_ti=1
+  fi
+
   PLAN_REASON="No change required."
   PLAN_KERNEL="${effective_kernel}"
   PLAN_OVERLAY="${selected_overlay}"
@@ -263,15 +274,28 @@ build_plan() {
     chosen_kernel="${TARGET_KERNEL}"
   else
     chosen_kernel=""
-    if kernel_has_rproc_overlay "${effective_kernel}"; then
+    if kernel_has_rproc_overlay "${effective_kernel}" && \
+       { [[ ${prefer_non_61_ti} -eq 0 ]] || ! kernel_is_6_1_ti "${effective_kernel}"; }; then
       chosen_kernel="${effective_kernel}"
     else
       while IFS= read -r candidate_kernel; do
         [[ -n "${candidate_kernel}" ]] || continue
         if kernel_has_rproc_overlay "${candidate_kernel}"; then
+          if [[ ${prefer_non_61_ti} -eq 1 ]] && kernel_is_6_1_ti "${candidate_kernel}"; then
+            continue
+          fi
           chosen_kernel="${candidate_kernel}"
         fi
       done < <(list_installed_kernels)
+
+      if [[ -z "${chosen_kernel}" && ${prefer_non_61_ti} -eq 1 ]]; then
+        while IFS= read -r candidate_kernel; do
+          [[ -n "${candidate_kernel}" ]] || continue
+          if kernel_has_rproc_overlay "${candidate_kernel}"; then
+            chosen_kernel="${candidate_kernel}"
+          fi
+        done < <(list_installed_kernels)
+      fi
     fi
   fi
 
@@ -290,6 +314,10 @@ build_plan() {
       [[ "${candidate_kernel}" == "${effective_kernel}" ]] && continue
 
       if ! kernel_version_newer_than "${candidate_kernel}" "${effective_kernel}"; then
+        continue
+      fi
+
+      if [[ ${prefer_non_61_ti} -eq 1 ]] && kernel_is_6_1_ti "${candidate_kernel}"; then
         continue
       fi
 
@@ -347,9 +375,13 @@ build_plan() {
 
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 0 && ${PLAN_NEEDS_OVERLAY_CHANGE} -eq 0 ]]; then
     if [[ ${KICK_OOPS_DETECTED} -eq 1 ]]; then
-      PLAN_REASON="Kick-path Oops detected, but no newer installed kernel with PRU RPROC overlay was found."
+      if kernel_is_6_1_ti "${PLAN_KERNEL}"; then
+        PLAN_REASON="Kick-path Oops detected on 6.1-ti. Install/use a 5.10-ti kernel with PRU RPROC overlay for RPMsg."
+      else
+        PLAN_REASON="Kick-path Oops detected, but no alternate installed kernel with PRU RPROC overlay was found."
+      fi
     elif [[ ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
-      PLAN_REASON="Vring IRQ failure detected, but no newer installed kernel with PRU RPROC overlay was found."
+      PLAN_REASON="PRU IRQ mapping failure detected, but no alternate installed kernel with PRU RPROC overlay was found."
     else
       PLAN_REASON="No change required."
     fi
@@ -363,7 +395,10 @@ show_plan() {
     log "observed kick-path failure signature in recent dmesg."
   fi
   if [[ ${VRING_IRQ_MISSING_DETECTED} -eq 1 ]]; then
-    log "observed vring IRQ failure signature in recent dmesg."
+    log "observed PRU IRQ mapping failure signature in recent dmesg."
+  fi
+  if kernel_is_6_1_ti "${PLAN_KERNEL}"; then
+    log "note: TI 6.1-ti kernels are known to be unstable for PRU RPMsg on some images."
   fi
 
   if [[ ${PLAN_NEEDS_UNAME_CHANGE} -eq 1 ]]; then
@@ -400,7 +435,7 @@ show_dmesg_summary() {
   log "last 120 dmesg lines (remoteproc/rpmsg/pru/oops):"
   printf '%s\n' "${hints}"
 
-  if printf '%s\n' "${hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|boot failed: -22|kick method not defined|irq vring not found|unable to get vring interrupt|boot failed: -6'; then
+  if printf '%s\n' "${hints}" | grep -Eqi 'pru_rproc_kick|internal error: oops|boot failed: -22|kick method not defined|irq vring not found|unable to get vring interrupt|irq kick not found|unable to get kick interrupt|boot failed: -6'; then
     log "detected RPMsg kick-path failure/oops signature. Kernel hop is recommended before further RPMsg traffic tests."
   fi
 }

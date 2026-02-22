@@ -79,8 +79,8 @@ backup_uenv() {
   log "created backup ${backup}"
 }
 
-detect_vring_irq_error() {
-  dmesg -T | egrep -i 'irq vring not found|unable to get vring interrupt|boot failed: -6' >/dev/null 2>&1
+detect_irq_mapping_error() {
+  dmesg -T | egrep -i 'irq vring not found|unable to get vring interrupt|irq kick not found|unable to get kick interrupt|boot failed: -6' >/dev/null 2>&1
 }
 
 show_plan() {
@@ -97,13 +97,14 @@ show_plan() {
     log "overlay destination file does not exist"
   fi
 
-  if detect_vring_irq_error; then
-    log "detected vring IRQ failure signature in dmesg (-6 / IRQ vring not found)"
+  if detect_irq_mapping_error; then
+    log "detected PRU RPMsg IRQ mapping failure signature in dmesg (-6 / missing vring|kick IRQ)"
   fi
 
   cat <<'EONEXT'
 [pru_rproc_irq_fix] plan:
   - compile beaglebone/overlays/BB-PRU-RPROC-IRQ-FIX.dts into /lib/firmware/BB-PRU-RPROC-IRQ-FIX.dtbo
+  - overlay enforces PRU interrupt-names = "vring", "kick" for pru0/pru1
   - set uboot_overlay_addr4=/lib/firmware/BB-PRU-RPROC-IRQ-FIX.dtbo in /boot/uEnv.txt
   - reboot, then redeploy firmware
 EONEXT

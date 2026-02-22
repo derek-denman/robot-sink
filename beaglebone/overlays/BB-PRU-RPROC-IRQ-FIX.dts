@@ -5,17 +5,23 @@
     compatible = "ti,am33xx";
 
     /*
-     * 6.1-ti PRU nodes on some AM335x images miss vring interrupt wiring.
-     * Add the same mapping used by known-good 5.10-ti device trees:
-     *   pru0 vring -> system event 16 -> host 2
-     *   pru1 vring -> system event 18 -> host 3
+     * Some AM335x images expose PRU remoteproc nodes with incomplete RPMsg
+     * interrupt wiring. Ensure both interrupts used by pru_rproc are present:
+     *   - "vring": PRU -> ARM notify path
+     *   - "kick":  ARM -> PRU notify path
+     *
+     * Mappings used here follow TI AM335x defaults:
+     *   pru0 vring: event 16, channel 2, host 2
+     *   pru0 kick:  event 17, channel 0, host 0
+     *   pru1 vring: event 18, channel 3, host 3
+     *   pru1 kick:  event 19, channel 1, host 1
      */
     fragment@0 {
         target = <&pru0>;
         __overlay__ {
             interrupt-parent = <&pruss_intc>;
-            interrupts = <16 2 2>;
-            interrupt-names = "vring";
+            interrupts = <16 2 2>, <17 0 0>;
+            interrupt-names = "vring", "kick";
         };
     };
 
@@ -23,8 +29,8 @@
         target = <&pru1>;
         __overlay__ {
             interrupt-parent = <&pruss_intc>;
-            interrupts = <18 3 3>;
-            interrupt-names = "vring";
+            interrupts = <18 3 3>, <19 1 1>;
+            interrupt-names = "vring", "kick";
         };
     };
 };

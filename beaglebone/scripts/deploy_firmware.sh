@@ -136,7 +136,7 @@ print_rpmsg_kick_oops_guidance() {
 }
 
 print_vring_irq_failure_guidance() {
-  echo "[deploy_firmware] detected PRU remoteproc vring IRQ mapping failure (Boot failed: -6)." >&2
+  echo "[deploy_firmware] detected PRU remoteproc IRQ mapping failure (Boot failed: -6 / missing vring or kick IRQ)." >&2
   echo "[deploy_firmware] remediation options:" >&2
   if [[ -x "${IRQ_FIX_SCRIPT}" ]]; then
     echo "  1) Inspect irq-fix overlay plan:" >&2
@@ -174,7 +174,7 @@ print_failure_diagnostics() {
     print_rpmsg_kick_oops_guidance
   fi
 
-  if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|boot failed: -6'; then
+  if printf '%s\n' "${dmesg_hints}" | grep -Eqi 'irq vring not found|unable to get vring interrupt|irq kick not found|unable to get kick interrupt|boot failed: -6'; then
     print_vring_irq_failure_guidance
   fi
 }
