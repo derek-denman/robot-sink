@@ -30,6 +30,43 @@ Paths:
 - Config: `jetson/console/console_config.yaml`
 - Foxglove layout seed: `jetson/console/layouts/foxglove_layout.json`
 
+## Enable SLAM/Nav2 Runtime
+
+`run_stack.sh` does not currently auto-launch SLAM Toolbox or Nav2. Console mapping/navigation buttons require those nodes to be running.
+
+Install packages on Jetson:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  ros-humble-slam-toolbox \
+  ros-humble-navigation2 \
+  ros-humble-nav2-bringup
+```
+
+Run SLAM (mapping):
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch slam_toolbox online_async_launch.py
+```
+
+Run Nav2 (navigation):
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch nav2_bringup navigation_launch.py \
+  use_sim_time:=false \
+  params_file:=~/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
+```
+
+Verify availability:
+
+```bash
+ros2 action list | grep navigate_to_pose
+ros2 service list | grep -E 'slam_toolbox|clear_entirely'
+```
+
 ## Acceptance Test (Jetson)
 
 1. Start stack:

@@ -76,6 +76,53 @@ Edit `jetson/console/console_config.yaml` for:
 - Motor bank scaling
 - Bag storage path
 
+## Enable SLAM + Nav2
+
+Robot Console exposes mapping/navigation actions, but those buttons only work when the ROS packages are installed and corresponding nodes are running.
+
+Install packages on Jetson:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  ros-humble-slam-toolbox \
+  ros-humble-navigation2 \
+  ros-humble-nav2-bringup
+```
+
+Verify package availability:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 pkg prefix slam_toolbox
+ros2 pkg prefix nav2_msgs
+```
+
+Start SLAM (mapping mode) in a terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch slam_toolbox online_async_launch.py
+```
+
+Start Nav2 (localization/navigation mode) in a terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch nav2_bringup navigation_launch.py \
+  use_sim_time:=false \
+  params_file:=~/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
+```
+
+Quick checks after launch:
+
+```bash
+ros2 action list | grep navigate_to_pose
+ros2 service list | grep slam_toolbox
+```
+
+If the `params_file` path is missing or invalid, Nav2 will not start and console nav actions remain unavailable.
+
 ## Troubleshooting
 
 Logs:

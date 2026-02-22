@@ -413,10 +413,15 @@ class RobotConsoleApiNode(Node):
     def _default_stack_command(self, command_key: str) -> str:
         robot_root = os.environ.get("ROBOT_ROOT", str(Path.cwd()))
         root_q = shlex.quote(robot_root)
+        # Match the top-level run_stack script process only, not child wrappers/log lines.
+        stack_proc_pattern = "^bash ./jetson/scripts/run_stack.sh$"
         if command_key == "start_cmd":
-            return f"pgrep -f '[j]etson/scripts/run_stack.sh' >/dev/null || (cd {root_q} && ./jetson/scripts/run_stack.sh)"
+            return (
+                f"pgrep -f {shlex.quote(stack_proc_pattern)} >/dev/null "
+                f"|| (cd {root_q} && ./jetson/scripts/run_stack.sh)"
+            )
         if command_key == "stop_cmd":
-            return "pkill -f '[j]etson/scripts/run_stack.sh' || true"
+            return f"pkill -f {shlex.quote(stack_proc_pattern)} || true"
         return ""
 
     def run_commissioning_check(self, check_id: str) -> Dict[str, Any]:
