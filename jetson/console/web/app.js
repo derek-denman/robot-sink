@@ -224,17 +224,19 @@ function setButtonAvailability(id, enabled, reason = "") {
 
 function renderCapabilities(capabilities) {
   const caps = capabilities || {};
+  const mappingStartEnabled = caps.mapping_start !== undefined ? caps.mapping_start !== false : caps.mapping_start_stop !== false;
+  const mappingStopEnabled = caps.mapping_stop !== undefined ? caps.mapping_stop !== false : caps.mapping_start_stop !== false;
   setButtonAvailability("stackStartBtn", caps.stack_start !== false, caps.stack_start_reason || "");
   setButtonAvailability("stackStopBtn", caps.stack_stop !== false, caps.stack_stop_reason || "");
   setButtonAvailability(
     "slamStartBtn",
-    caps.mapping_start_stop !== false,
-    caps.mapping_start_stop_reason || "SLAM services unavailable",
+    mappingStartEnabled,
+    caps.mapping_start_reason || caps.mapping_start_stop_reason || "SLAM start unavailable",
   );
   setButtonAvailability(
     "slamStopBtn",
-    caps.mapping_start_stop !== false,
-    caps.mapping_start_stop_reason || "SLAM services unavailable",
+    mappingStopEnabled,
+    caps.mapping_stop_reason || caps.mapping_start_stop_reason || "SLAM stop unavailable",
   );
   setButtonAvailability("saveMapBtn", caps.mapping_save !== false, caps.mapping_save_reason || "");
   setButtonAvailability(

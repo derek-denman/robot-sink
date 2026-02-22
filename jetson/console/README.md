@@ -75,6 +75,12 @@ Edit `jetson/console/console_config.yaml` for:
 - Stream rates (`scan_push_hz`, `camera_stream_hz`)
 - Motor bank scaling
 - Bag storage path
+- Mapping launch hooks (`mapping.start_cmd`, `mapping.stop_cmd`, `mapping.switch_to_localization_cmd`)
+
+Notes:
+
+- `Start SLAM`/`Stop SLAM` use live `slam_toolbox` services when available.
+- If services are unavailable, backend falls back to `mapping.start_cmd` / `mapping.stop_cmd` (or built-in defaults).
 
 ## Enable SLAM + Nav2
 

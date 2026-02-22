@@ -76,6 +76,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "mapping": {
         "switch_to_localization_cmd": "",
+        "start_cmd": "",
+        "stop_cmd": "",
     },
     "reliability": {
         "temp_paths": [],
@@ -226,6 +228,11 @@ class RobotConsoleApiNode(Node):
         switch_localization_cmd = (
             self._config.get("mapping", {}).get("switch_to_localization_cmd", "").strip()
         )
+        mapping_start_available = adapter_caps.get("slam_resume", False) or self.mapping_command_available(
+            "start_cmd"
+        )
+        mapping_stop_available = adapter_caps.get("slam_pause", False) or self.mapping_command_available("stop_cmd")
+        mapping_start_stop_available = mapping_start_available or mapping_stop_available
 
         return {
             "timestamp_unix": time.time(),
@@ -259,7 +266,9 @@ class RobotConsoleApiNode(Node):
             "capabilities": {
                 "stack_start": self.stack_command_available("start_cmd"),
                 "stack_stop": self.stack_command_available("stop_cmd"),
-                "mapping_start_stop": adapter_caps.get("slam_start_stop", False),
+                "mapping_start": mapping_start_available,
+                "mapping_stop": mapping_stop_available,
+                "mapping_start_stop": mapping_start_stop_available,
                 "mapping_save": adapter_caps.get("slam_save", False),
                 "switch_localization": bool(switch_localization_cmd),
                 "nav_goal": adapter_caps.get("nav_goal", False),
@@ -268,8 +277,10 @@ class RobotConsoleApiNode(Node):
                 "camera_stream_connected": camera_status.get("connected", False),
                 "stack_start_reason": "" if self.stack_command_available("start_cmd") else "stack_start_not_available",
                 "stack_stop_reason": "" if self.stack_command_available("stop_cmd") else "stack_stop_not_available",
+                "mapping_start_reason": "" if mapping_start_available else "slam_start_unavailable",
+                "mapping_stop_reason": "" if mapping_stop_available else "slam_stop_unavailable",
                 "mapping_start_stop_reason": ""
-                if adapter_caps.get("slam_start_stop", False)
+                if mapping_start_stop_available
                 else "slam_services_unavailable",
                 "mapping_save_reason": ""
                 if adapter_caps.get("slam_save", False)
@@ -410,6 +421,20 @@ class RobotConsoleApiNode(Node):
         )
         return bool(cmd)
 
+    def run_mapping_command(self, command_key: str, background: bool = False) -> Dict[str, Any]:
+        cmd = self._config.get("mapping", {}).get(command_key, "").strip() or self._default_mapping_command(
+            command_key
+        )
+        if not cmd:
+            return {"ok": False, "error": f"mapping_{command_key}_not_configured"}
+        return self.run_shell_command(cmd, background=background)
+
+    def mapping_command_available(self, command_key: str) -> bool:
+        cmd = self._config.get("mapping", {}).get(command_key, "").strip() or self._default_mapping_command(
+            command_key
+        )
+        return bool(cmd)
+
     def _default_stack_command(self, command_key: str) -> str:
         robot_root = os.environ.get("ROBOT_ROOT", str(Path.cwd()))
         root_q = shlex.quote(robot_root)
@@ -422,6 +447,24 @@ class RobotConsoleApiNode(Node):
             )
         if command_key == "stop_cmd":
             return f"pkill -f {shlex.quote(stack_proc_pattern)} || true"
+        return ""
+
+    def _default_mapping_command(self, command_key: str) -> str:
+        robot_root = os.environ.get("ROBOT_ROOT", str(Path.cwd()))
+        root_q = shlex.quote(robot_root)
+        ros_distro = os.environ.get("ROS_DISTRO", "humble")
+        ros_setup = shlex.quote(f"/opt/ros/{ros_distro}/setup.bash")
+        ws_setup = shlex.quote(f"{robot_root}/ros_ws/install/setup.bash")
+
+        if command_key == "start_cmd":
+            return (
+                f"source {ros_setup} >/dev/null 2>&1; "
+                f"if [ -f {ws_setup} ]; then source {ws_setup}; fi; "
+                "pgrep -f '[s]lam_toolbox' >/dev/null || "
+                f"(cd {root_q} && ros2 launch slam_toolbox online_async_launch.py)"
+            )
+        if command_key == "stop_cmd":
+            return "pkill -f '[s]lam_toolbox' || true"
         return ""
 
     def run_commissioning_check(self, check_id: str) -> Dict[str, Any]:
@@ -746,15 +789,39 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
 
     async def mapping_start(_request: web.Request) -> web.Response:
         result = node.adapters.start_slam()
-        node.set_mapping_state(slam_active=result.get("ok", False), localization_mode=False)
+        ok = result.get("ok", False)
+
+        if not ok and result.get("error") in {"service_unavailable", "client_missing"}:
+            launch_result = node.run_mapping_command("start_cmd", background=True)
+            ok = launch_result.get("ok", False)
+            result = {
+                "ok": ok,
+                "service_result": result,
+                "launch_result": launch_result,
+                "path": "launch_cmd",
+            }
+
+        node.set_mapping_state(slam_active=ok, localization_mode=False)
         node._queue_status_push()
-        return _app_response(result.get("ok", False), result=result)
+        return _app_response(ok, result=result)
 
     async def mapping_stop(_request: web.Request) -> web.Response:
         result = node.adapters.stop_slam()
+        ok = result.get("ok", False)
+
+        if not ok and result.get("error") in {"service_unavailable", "client_missing"}:
+            stop_result = node.run_mapping_command("stop_cmd", background=False)
+            ok = stop_result.get("ok", False)
+            result = {
+                "ok": ok,
+                "service_result": result,
+                "stop_result": stop_result,
+                "path": "stop_cmd",
+            }
+
         node.set_mapping_state(slam_active=False)
         node._queue_status_push()
-        return _app_response(result.get("ok", False), result=result)
+        return _app_response(ok, result=result)
 
     async def mapping_save(request: web.Request) -> web.Response:
         payload = await _json_request(request)

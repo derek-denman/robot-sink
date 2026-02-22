@@ -58,6 +58,8 @@ stack:
   stop_cmd: ""
 
 mapping:
+  start_cmd: ""
+  stop_cmd: ""
   switch_to_localization_cmd: ""
 
 reliability:

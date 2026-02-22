@@ -701,9 +701,9 @@ class RosAdapters:
         with self._lock:
             nav_cancel = self._nav_goal_handle is not None
 
-        slam_start_stop = self._service_ready(self._slam_resume_client) and self._service_ready(
-            self._slam_pause_client
-        )
+        slam_resume = self._service_ready(self._slam_resume_client)
+        slam_pause = self._service_ready(self._slam_pause_client)
+        slam_start_stop = slam_resume and slam_pause
         slam_save = SaveMap is not None and self._service_ready(self._slam_save_client)
         clear_costmaps = all(self._service_ready(client) for client in self._clear_costmap_clients)
 
@@ -713,6 +713,8 @@ class RosAdapters:
             "nav_goal": nav_msgs_available and nav_server_ready,
             "nav_cancel": nav_cancel,
             "clear_costmaps": clear_costmaps,
+            "slam_resume": slam_resume,
+            "slam_pause": slam_pause,
             "slam_start_stop": slam_start_stop,
             "slam_save": slam_save,
         }
