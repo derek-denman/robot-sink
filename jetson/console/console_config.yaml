@@ -17,6 +17,39 @@ manual_control:
   bank_linear_scale: 0.8
   bank_angular_scale: 1.7
 
+arm:
+  joints:
+    - name: j1
+      min: -3.14
+      max: 3.14
+      step: 0.01
+      default: 0.0
+    - name: j2
+      min: -3.14
+      max: 3.14
+      step: 0.01
+      default: 0.0
+    - name: j3
+      min: -3.14
+      max: 3.14
+      step: 0.01
+      default: 0.0
+    - name: j4
+      min: -3.14
+      max: 3.14
+      step: 0.01
+      default: 0.0
+    - name: j5
+      min: -3.14
+      max: 3.14
+      step: 0.01
+      default: 0.0
+  named_poses:
+    - stow
+    - ready
+    - pregrasp
+    - drop
+
 topics:
   cmd_vel: /cmd_vel
   scan: /scan
@@ -64,3 +97,6 @@ mapping:
 
 reliability:
   temp_paths: []
+
+logs:
+  sources: {}

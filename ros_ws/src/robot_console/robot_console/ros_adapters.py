@@ -631,14 +631,10 @@ class RosAdapters:
 
     def _auto_select_camera_topic(self, metrics: Sequence[Dict[str, Any]]) -> None:
         selected = self._camera_stream_topic
-        selected_metric = None
-        for metric in metrics:
-            if metric.get("topic") == selected:
-                selected_metric = metric
-                break
-
-        if selected_metric and selected_metric.get("connected"):
-            return
+        if selected:
+            for metric in metrics:
+                if metric.get("topic") == selected:
+                    return
 
         connected_topics = [metric for metric in metrics if metric.get("connected")]
         if not connected_topics:

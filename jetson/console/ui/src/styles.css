@@ -1,0 +1,169 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: radial-gradient(circle at 10% 15%, #17222f 0%, #0c1219 55%, #090d12 100%);
+}
+
+body {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.hmi-brand {
+  padding: 16px 14px;
+  border-bottom: 1px solid rgba(130, 164, 197, 0.18);
+  margin-bottom: 8px;
+}
+
+.hmi-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 10px 16px;
+  min-height: 76px;
+  height: auto !important;
+  line-height: normal !important;
+  background: linear-gradient(90deg, rgba(15, 22, 31, 0.98), rgba(21, 30, 41, 0.96));
+  border-bottom: 1px solid rgba(128, 158, 187, 0.2);
+}
+
+.hmi-header-left {
+  min-width: 240px;
+  flex: 1 1 300px;
+}
+
+.hmi-header-left .ant-space {
+  flex-wrap: wrap;
+}
+
+.hmi-header-center {
+  min-width: 240px;
+  flex: 0 1 auto;
+}
+
+.hmi-header-right {
+  min-width: 240px;
+  margin-left: auto;
+  flex: 0 1 auto;
+}
+
+.hmi-header-right .ant-space {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.hmi-content {
+  padding: 16px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.hmi-card {
+  background: linear-gradient(180deg, rgba(16, 24, 34, 0.96), rgba(11, 18, 26, 0.96));
+  border: 1px solid rgba(123, 156, 189, 0.18);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.hmi-right-panel {
+  border-left: 1px solid rgba(120, 154, 188, 0.22);
+}
+
+.hmi-right-inner {
+  height: 100%;
+  overflow-y: auto;
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(13, 20, 29, 0.98), rgba(8, 13, 20, 0.96));
+}
+
+.hmi-mini-card {
+  background: rgba(18, 28, 39, 0.88);
+  border: 1px solid rgba(127, 156, 188, 0.16);
+}
+
+.camera-frame {
+  position: relative;
+  width: 100%;
+  min-height: 280px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(130, 162, 192, 0.2);
+  background: #0a1118;
+}
+
+.camera-frame img {
+  width: 100%;
+  height: auto;
+  display: block;
+  min-height: 280px;
+  object-fit: cover;
+}
+
+.drive-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.drive-grid button:first-child {
+  grid-column: 2;
+}
+
+.drive-grid button:nth-child(2) {
+  grid-column: 1;
+}
+
+.drive-grid button:nth-child(3) {
+  grid-column: 2;
+}
+
+.drive-grid button:nth-child(4) {
+  grid-column: 3;
+}
+
+.drive-grid button:last-child {
+  grid-column: 2;
+}
+
+.log-view {
+  border: 1px solid rgba(120, 150, 180, 0.2);
+  border-radius: 8px;
+  max-height: 520px;
+  overflow-y: auto;
+  background: #080d14;
+}
+
+.log-row {
+  display: block;
+  border-bottom: 1px solid rgba(99, 125, 151, 0.12);
+  padding: 8px 12px;
+}
+
+.log-row .ant-list-item-meta {
+  margin-bottom: 6px;
+}
+
+@media (max-width: 1200px) {
+  .hmi-header {
+    padding: 10px 12px;
+  }
+
+  .hmi-header-left,
+  .hmi-header-center,
+  .hmi-header-right {
+    margin-left: 0;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .hmi-header-right .ant-space {
+    justify-content: flex-start;
+  }
+}

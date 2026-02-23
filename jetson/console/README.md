@@ -1,10 +1,16 @@
 # Robot Console (Jetson)
 
-Robot Console is a Jetson-hosted web UI + ROS 2 backend for robot mode management, safety gating, teleop, arm commands, mapping/navigation actions, commissioning checks, and reliability/demo workflows.
+Robot Console is the Jetson-hosted operator HMI and ROS 2 backend for mode/safety control, manual drive + arm, mapping/nav workflows, visual telemetry, and logs.
 
-## Start
+## Runtime URLs
 
-On Jetson:
+- Console UI: `http://<jetson-ip>:8080`
+- Telemetry WebSocket: `ws://<jetson-ip>:8080/ws`
+- Foxglove bridge: `ws://<jetson-ip>:8765`
+
+## Build + Run
+
+Backend (Jetson):
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -15,222 +21,176 @@ cd ~/robot-sink
 ./jetson/scripts/run_stack.sh
 ```
 
-This starts:
+UI source lives in `jetson/console/ui` and production assets are served from `jetson/console/web`.
 
-- `robot_console` backend (`http://0.0.0.0:8080`)
-- WebSocket telemetry (`ws://<jetson>:8080/ws`)
-- Foxglove bridge (`ws://<jetson>:8765`)
+When you change the React UI, rebuild once:
 
-## Open UI
-
-From your laptop (same network):
-
-```text
-http://<jetson-ip>:8080
+```bash
+export PATH="$HOME/.local/node/current/bin:$PATH"
+cd ~/robot-sink/jetson/console/ui
+npm install
+npm run build:web
 ```
 
-Example from macOS Safari/Chrome: `http://10.0.0.178:8080`
+## HMI Layout
+
+- Left navigation: Operations, Visualizer, Manual Base, Arm Control, Training/Data, Demo Runs, Logs
+- Top bar: transport status, backend-authoritative mode selector, safety tags
+- Right telemetry panel: live safety, sensor FPS/age, storage/temps, nav state, foxglove link
+- Dark-mode Ant Design UI with keyboard/manual controls
+
+## Safety + Persistence Behavior
+
+- Starts DISARMED
+- Motion gated by `manual` mode + explicit arm/deadman window
+- Watchdog timeout disarms and publishes stop
+- `Stop All` publishes zero base command, cancels nav goal, stops arm, and disarms
+- Mode is backend source-of-truth and survives WS reconnects/refresh
+- Camera topic selection is operator-sticky (no auto-overwrite while selected topic remains available)
 
 ## Visualizers
 
-Built-in visualizer in the UI:
+Built-in visualizer:
 
-- Live lidar canvas (`/scan` over console websocket)
-- Live OAK-D MJPEG (`/stream/camera.mjpeg`)
-- FPS + age + connection indicators for both
+- Live lidar canvas from websocket `/scan` payloads
+- Live camera MJPEG stream from `/stream/camera.mjpeg`
+- FPS/age/connected indicators
 
 Foxglove (recommended full view):
 
 - Connect to `ws://<jetson-ip>:8765`
-- Default layout seed: `jetson/console/layouts/foxglove_layout.json`
+- Layout seed: `jetson/console/layouts/foxglove_layout.json`
 
-If Foxglove Web blocks insecure websocket access, use Foxglove Desktop, or tunnel from Mac:
+If browser blocks insecure websocket, use Foxglove Desktop or SSH tunnel:
 
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 jetson@<jetson-ip>
 ```
 
-Then connect Foxglove to:
+Then connect to `ws://localhost:8765`.
 
-```text
-ws://localhost:8765
-```
+## Logs UI
 
-## Core UI Behavior
+Logs page is read-only and backed by safe, whitelisted sources:
 
-- Mode source of truth is backend mode (`/api/status`)
-- UI stores last selected mode in `localStorage` and reconciles on websocket reconnect
-- Robot starts disarmed
-- Motion commands require manual mode + explicit arm
-- Motion watchdog timeout auto-disarms + publishes stop
-- `Stop All` publishes zero base command, cancels nav goal, stops arm, and disarms
+- `robot_console`, `run_stack`, `foxglove`, `oakd`, `rplidar`, `roarm`, `task`, `bb_bridge`
+- dynamic sources: `nav2`, `slam` (resolved from latest ROS logs)
 
-## Config
+API endpoints:
 
-Edit `jetson/console/console_config.yaml` for:
+- `GET /api/logs/sources`
+- `GET /api/logs/stream?source=<id>&tail=<n>` (SSE)
+- `GET /api/logs/diagnostics` (text bundle, optional download)
 
-- HTTP host/port
-- Foxglove port
-- Topic names
-- Stream rates (`scan_push_hz`, `camera_stream_hz`)
-- Motor bank scaling
-- Bag storage path
-- Mapping launch hooks (`mapping.start_cmd`, `mapping.stop_cmd`, `mapping.switch_to_localization_cmd`)
+## Jetson Validation Commands
 
-Notes:
-
-- `Start SLAM`/`Stop SLAM` use live `slam_toolbox` services when available.
-- If services are unavailable, backend falls back to `mapping.start_cmd` / `mapping.stop_cmd` (or built-in defaults).
-
-## Enable SLAM + Nav2
-
-Robot Console exposes mapping/navigation actions, but those buttons only work when the ROS packages are installed and corresponding nodes are running.
-
-Install packages on Jetson:
-
-```bash
-sudo apt update
-sudo apt install -y \
-  ros-humble-slam-toolbox \
-  ros-humble-navigation2 \
-  ros-humble-nav2-bringup
-```
-
-Verify package availability:
-
-```bash
-source /opt/ros/humble/setup.bash
-ros2 pkg prefix slam_toolbox
-ros2 pkg prefix nav2_msgs
-```
-
-Start SLAM (mapping mode) in a terminal:
-
-```bash
-source /opt/ros/humble/setup.bash
-ros2 launch slam_toolbox online_async_launch.py
-```
-
-Start Nav2 (localization/navigation mode) in a terminal:
-
-```bash
-mkdir -p "$HOME/robot-sink/ros_ws/src/nav2_config"
-cp /opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml \
-  "$HOME/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml"
-
-source /opt/ros/humble/setup.bash
-ros2 launch nav2_bringup navigation_launch.py \
-  use_sim_time:=false \
-  params_file:=$HOME/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
-```
-
-Quick checks after launch:
-
-```bash
-ros2 action list | grep navigate_to_pose
-ros2 service list | grep slam_toolbox
-```
-
-If the `params_file` path is missing or invalid, Nav2 will not start and console nav actions remain unavailable.
-
-## Troubleshooting
-
-Logs:
-
-- `jetson/logs/robot-console.log`
-- `jetson/logs/foxglove.log`
-- `jetson/logs/oakd.log`
-- `jetson/logs/rplidar.log`
-
-Check service-template install status:
-
-```bash
-systemctl status robot-jetson-stack.service --no-pager
-```
-
-If unit is missing, install/enable with:
-
-```bash
-./jetson/scripts/enable_services.sh --user jetson
-```
-
-(Requires sudo privileges on Jetson.)
-
-## How To Test
-
-1. Start stack:
-
-```bash
-./jetson/scripts/run_stack.sh
-```
-
-Expected log lines in `/tmp/robot_stack_manual.log` or terminal:
-
-- `Starting foxglove: ...`
-- `Starting robot-console: ...`
-- `Stack running. Logs: ...`
-
-2. Verify API status:
+1. API + stream health:
 
 ```bash
 python3 - <<'PY'
 import json, urllib.request
 with urllib.request.urlopen('http://127.0.0.1:8080/api/status', timeout=5) as r:
-    data = json.load(r)
-print('mode', data['mode'])
-print('scan_fps', data['visualizer']['scan']['fps'])
-print('camera_fps', data['visualizer']['camera']['fps'])
+    d = json.load(r)
+print('mode', d['mode'])
+print('scan_fps', d['visualizer']['scan']['fps'])
+print('camera_fps', d['visualizer']['camera']['fps'])
+print('camera_topic', d['visualizer']['camera']['selected_topic'])
 PY
 ```
 
-Expected: `mode manual`, non-zero scan/camera fps when sensors are active.
+Expected: `mode` present, `scan_fps > 0`; camera values non-zero when OAK is publishing.
 
-3. Verify websocket telemetry:
+2. WebSocket telemetry:
 
 ```bash
 python3 - <<'PY'
 import asyncio, json, aiohttp
 async def main():
-    async with aiohttp.ClientSession() as s:
-        async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
-            for _ in range(3):
-                msg = await ws.receive(timeout=3)
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    print(json.loads(msg.data).get('type'))
+  async with aiohttp.ClientSession() as s:
+    async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+      for _ in range(5):
+        m = await ws.receive(timeout=4)
+        if m.type == aiohttp.WSMsgType.TEXT:
+          print(json.loads(m.data).get('type'))
 asyncio.run(main())
 PY
 ```
 
 Expected: includes `status` and `scan` events.
 
-4. Verify manual/safety gating:
+3. Mode persistence across reconnect:
+
+```bash
+python3 - <<'PY'
+import json, urllib.request, asyncio, aiohttp
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
+def mode():
+  with urllib.request.urlopen(BASE+'/api/status',timeout=6) as r:
+    return json.load(r)['mode']
+async def ws_once():
+  async with aiohttp.ClientSession() as s:
+    async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+      await ws.receive(timeout=3)
+post('/api/mode', {'mode':'demo'})
+print('before', mode())
+asyncio.run(ws_once())
+print('after_reconnect', mode())
+post('/api/mode', {'mode':'manual'})
+PY
+```
+
+Expected: `before` and `after_reconnect` stay `demo`.
+
+4. Camera topic persistence:
 
 ```bash
 python3 - <<'PY'
 import json, time, urllib.request
 BASE='http://127.0.0.1:8080'
 def post(path,payload):
-    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=5) as r:
-        return json.loads(r.read().decode())
-print('disarmed_cmd', post('/api/cmd_vel', {'linear_x':0.1,'angular_z':0.0}))
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
+def selected():
+  with urllib.request.urlopen(BASE+'/api/status',timeout=6) as r:
+    return json.load(r)['visualizer']['camera']['selected_topic']
+post('/api/camera/select', {'topic':'/oak/rgb/image_raw/compressed'})
+for i in range(5):
+  print(i, selected())
+  time.sleep(0.5)
+PY
+```
+
+Expected: selected topic remains `/oak/rgb/image_raw/compressed`.
+
+5. Manual safety gating + stop_all:
+
+```bash
+python3 - <<'PY'
+import json, time, urllib.request
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
 post('/api/mode', {'mode':'manual'})
+post('/api/arm', {'armed':False})
+print('disarmed', post('/api/manual/base', {'type':'motor_bank','left':20,'right':20}))
 post('/api/arm', {'armed':True})
-print('bank_armed', post('/api/motor_bank', {'left':25,'right':30}))
-time.sleep(1.2)
-print('bank_after_timeout', post('/api/motor_bank', {'left':25,'right':30}))
+print('armed', post('/api/manual/base', {'type':'motor_bank','left':20,'right':15}))
+time.sleep(1.0)
+print('after_timeout', post('/api/manual/base', {'type':'motor_bank','left':20,'right':15}))
 print('stop_all', post('/api/stop_all', {}))
 PY
 ```
 
-Expected:
+Expected: first command rejected, armed command accepted, timeout rejected, `stop_all` succeeds.
 
-- disarmed command rejected
-- armed command accepted
-- after timeout command rejected (`robot_not_armed`)
-- `stop_all` returns `ok: true`
-
-5. Verify Foxglove bridge:
+6. Foxglove socket:
 
 ```bash
 nc -vz 127.0.0.1 8765
@@ -238,16 +198,16 @@ nc -vz 127.0.0.1 8765
 
 Expected: connection succeeded.
 
-6. Verify recording:
+7. Recording:
 
 ```bash
 python3 - <<'PY'
 import json, time, urllib.request
 BASE='http://127.0.0.1:8080'
 def post(path,payload):
-    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=8) as r:
-        return json.loads(r.read().decode())
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=8) as r:
+    return json.load(r)
 print(post('/api/recording/start', {'tags':'console-test','topics':['/scan']}))
 time.sleep(1.5)
 print(post('/api/recording/stop', {}))
@@ -255,4 +215,23 @@ PY
 ls -1dt ~/robot-sink/data/bags/* | head -n 2
 ```
 
-Expected: start/stop both `ok: true`; new bag directory exists.
+Expected: start/stop `ok: true`, and a new bag directory appears.
+
+## Troubleshooting
+
+- `stack start/stop cmd not configured`:
+  Default commands are now auto-derived; verify `/api/status` -> `capabilities.stack_start` and `capabilities.stack_stop` are `true`.
+
+- Foxglove bind error (`Couldn't initialize websocket server: Bind Error`):
+  `run_stack.sh` now detects pre-bound ports and assumes existing bridge/backend instead of crashing.
+
+- OAK stream 0 FPS with `X_LINK_DEVICE_ALREADY_IN_USE` in `jetson/logs/oakd.log`:
+  Another process still owns the OAK device. Stop duplicates and relaunch stack.
+
+  ```bash
+  pkill -f '[d]epthai_ros_driver camera.launch.py' || true
+  pkill -f '[o]ak_container' || true
+  ```
+
+- SLAM/Nav actions unavailable:
+  Install and launch required nodes (`slam_toolbox`, `nav2`) before using mapping/nav controls.

@@ -39,6 +39,17 @@ export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT
 
 mkdir -p "${LOG_DIR}"
 
+STACK_LOCK_FILE="${JETSON_STACK_LOCK_FILE:-/tmp/robot-jetson-stack.lock}"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"${STACK_LOCK_FILE}"
+  if ! flock -n 9; then
+    log "Another run_stack instance is already active (lock: ${STACK_LOCK_FILE}). Exiting."
+    exit 0
+  fi
+else
+  log "flock not found; duplicate stack instances are not prevented."
+fi
+
 if [[ "${SETUP_BB_NETWORK:-1}" == "1" ]]; then
   log "Configuring BeagleBone USB networking"
   if ! "${SCRIPT_DIR}/setup_bb_usb_network.sh"; then
@@ -115,10 +126,26 @@ ros_pkg_exists() {
   command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix "${pkg}" >/dev/null 2>&1
 }
 
+process_running() {
+  local pattern="$1"
+  pgrep -f "${pattern}" >/dev/null 2>&1
+}
+
+port_is_listening() {
+  local host="$1"
+  local port="$2"
+  command -v nc >/dev/null 2>&1 && nc -z "${host}" "${port}" >/dev/null 2>&1
+}
+
 if [[ -n "${FOXGLOVE_CMD:-}" ]]; then
   start_cmd "foxglove" "${FOXGLOVE_CMD}"
 elif ros_pkg_exists foxglove_bridge; then
-  start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${FOXGLOVE_PORT}"; then
+    log "Port ${FOXGLOVE_PORT} already in use; assuming foxglove bridge is already running"
+    start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove port ${FOXGLOVE_PORT} already in use; using existing bridge'"
+  else
+    start_cmd "foxglove" "ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${FOXGLOVE_PORT}"
+  fi
 else
   start_cmd "foxglove" "python3 ${SCRIPT_DIR}/runtime_stub.py --name foxglove --hint 'foxglove_bridge not found; bridge unavailable'"
 fi
@@ -126,9 +153,19 @@ fi
 if [[ -n "${ROBOT_CONSOLE_CMD:-}" ]]; then
   start_cmd "robot-console" "${ROBOT_CONSOLE_CMD}"
 elif ros_pkg_exists robot_console; then
-  start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${ROBOT_CONSOLE_PORT:-8080}"; then
+    log "Port ${ROBOT_CONSOLE_PORT:-8080} already in use; assuming robot console backend is already running"
+    start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot console port ${ROBOT_CONSOLE_PORT:-8080} already in use; using existing backend'"
+  else
+    start_cmd "robot-console" "ros2 launch robot_console robot_console.launch.py start_foxglove:=false config_file:=${ROBOT_CONSOLE_CONFIG} web_root:=${ROBOT_CONSOLE_WEB_ROOT} http_port:=${ROBOT_CONSOLE_PORT:-8080} foxglove_port:=${FOXGLOVE_PORT}"
+  fi
 elif [[ -d "${ROBOT_ROOT}/ros_ws/src/robot_console/robot_console" ]]; then
-  start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
+  if port_is_listening "127.0.0.1" "${ROBOT_CONSOLE_PORT:-8080}"; then
+    log "Port ${ROBOT_CONSOLE_PORT:-8080} already in use; assuming robot console backend is already running"
+    start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot console port ${ROBOT_CONSOLE_PORT:-8080} already in use; using existing backend'"
+  else
+    start_cmd "robot-console" "PYTHONPATH=${ROBOT_ROOT}/ros_ws/src/robot_console:${PYTHONPATH:-} python3 -m robot_console.api_node --ros-args -p config_file:=${ROBOT_CONSOLE_CONFIG} -p web_root:=${ROBOT_CONSOLE_WEB_ROOT} -p http_port:=${ROBOT_CONSOLE_PORT:-8080} -p foxglove_port:=${FOXGLOVE_PORT}"
+  fi
 else
   start_cmd "robot-console" "python3 ${SCRIPT_DIR}/runtime_stub.py --name robot-console --hint 'robot_console package missing; build ros_ws first'"
 fi
@@ -136,7 +173,12 @@ fi
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
 elif ros_pkg_exists depthai_ros_driver; then
-  start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
+  if process_running "[d]epthai_ros_driver camera.launch.py"; then
+    log "Detected existing depthai launch process; reusing existing OAK runtime."
+    start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver already running; using existing process'"
+  else
+    start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
+  fi
 else
   start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver not found; running stub'"
 fi
@@ -144,7 +186,12 @@ fi
 if [[ -n "${RPLIDAR_LAUNCH_CMD:-}" ]]; then
   start_cmd "rplidar" "${RPLIDAR_LAUNCH_CMD}"
 elif ros_pkg_exists rplidar_ros; then
-  start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
+  if process_running "[r]plidar_ros rplidar_a1_launch.py"; then
+    log "Detected existing rplidar launch process; reusing existing lidar runtime."
+    start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --hint 'rplidar_ros already running; using existing process'"
+  else
+    start_cmd "rplidar" "$(retry_loop_cmd "rplidar" "ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR frame_id:=laser" 4)"
+  fi
 else
   start_cmd "rplidar" "python3 ${SCRIPT_DIR}/runtime_stub.py --name rplidar --check-device /dev/ttyRPLIDAR --hint 'rplidar_ros not found; running stub'"
 fi

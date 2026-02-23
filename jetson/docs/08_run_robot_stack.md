@@ -11,9 +11,9 @@ cd ~/robot-sink
 
 Default behavior:
 
-- Configures BB USB networking (`192.168.7.1/24`) when possible
+- Attempts BB USB networking setup (continues on failure for bench use)
 - Starts `foxglove_bridge`, `robot_console`, OAK-D, RPLIDAR, RoArm stub, task stub, and BB bridge
-- Uses real ROS nodes when installed, otherwise falls back to stubs
+- Uses real ROS nodes when installed; falls back to stubs where needed
 - Writes logs under `jetson/logs/`
 
 ## Robot Console Quick Start
@@ -26,15 +26,35 @@ When stack is running:
 
 Paths:
 
-- Web assets: `jetson/console/web/`
-- Config: `jetson/console/console_config.yaml`
+- UI source: `jetson/console/ui/`
+- Production UI assets: `jetson/console/web/`
+- Console config: `jetson/console/console_config.yaml`
 - Foxglove layout seed: `jetson/console/layouts/foxglove_layout.json`
+
+## Build Steps
+
+Backend package:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/robot-sink/ros_ws
+colcon build --symlink-install --packages-select robot_console
+```
+
+If UI source changed, rebuild assets:
+
+```bash
+export PATH="$HOME/.local/node/current/bin:$PATH"
+cd ~/robot-sink/jetson/console/ui
+npm install
+npm run build:web
+```
 
 ## Enable SLAM/Nav2 Runtime
 
-`run_stack.sh` does not currently auto-launch SLAM Toolbox or Nav2. Console mapping/navigation buttons require those nodes to be running.
+`run_stack.sh` does not auto-launch SLAM Toolbox/Nav2. Mapping/Nav buttons require those nodes.
 
-Install packages on Jetson:
+Install packages:
 
 ```bash
 sudo apt update
@@ -44,14 +64,14 @@ sudo apt install -y \
   ros-humble-nav2-bringup
 ```
 
-Run SLAM (mapping):
+Run SLAM:
 
 ```bash
 source /opt/ros/humble/setup.bash
 ros2 launch slam_toolbox online_async_launch.py
 ```
 
-Run Nav2 (navigation):
+Run Nav2:
 
 ```bash
 mkdir -p "$HOME/robot-sink/ros_ws/src/nav2_config"
@@ -64,7 +84,7 @@ ros2 launch nav2_bringup navigation_launch.py \
   params_file:=$HOME/robot-sink/ros_ws/src/nav2_config/nav2_params.yaml
 ```
 
-Verify availability:
+Verify:
 
 ```bash
 ros2 action list | grep navigate_to_pose
@@ -79,86 +99,130 @@ ros2 service list | grep -E 'slam_toolbox|clear_entirely'
 ./jetson/scripts/run_stack.sh
 ```
 
-Expected:
+Expected startup lines:
 
 - `Starting foxglove: ...`
 - `Starting robot-console: ...`
 - `Stack running. Logs: ...`
 
-2. Confirm telemetry endpoint:
+2. Verify API status:
 
 ```bash
 python3 - <<'PY'
 import json, urllib.request
 with urllib.request.urlopen('http://127.0.0.1:8080/api/status', timeout=5) as r:
-    data = json.load(r)
-print(data['mode'])
-print(data['visualizer']['scan']['fps'], data['visualizer']['camera']['fps'])
+    d = json.load(r)
+print('mode', d['mode'])
+print('scan_fps', d['visualizer']['scan']['fps'])
+print('camera_fps', d['visualizer']['camera']['fps'])
+print('camera_topic', d['visualizer']['camera']['selected_topic'])
 PY
 ```
 
-Expected: mode value present, stream FPS values non-zero when sensors are publishing.
+Expected: mode populated, scan FPS > 0, camera FPS > 0 when OAK driver is healthy.
 
-3. Verify mode persistence behavior (refresh + reconnect):
+3. Verify websocket telemetry updates:
 
 ```bash
 python3 - <<'PY'
-import asyncio, json, urllib.request, aiohttp
+import asyncio, json, aiohttp
+async def main():
+  async with aiohttp.ClientSession() as s:
+    async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+      for _ in range(5):
+        msg = await ws.receive(timeout=4)
+        if msg.type == aiohttp.WSMsgType.TEXT:
+          print(json.loads(msg.data).get('type'))
+asyncio.run(main())
+PY
+```
+
+Expected: includes `status` and `scan`.
+
+4. Verify mode persistence and reconnect behavior:
+
+```bash
+python3 - <<'PY'
+import json, urllib.request, asyncio, aiohttp
 BASE='http://127.0.0.1:8080'
 def post(path,payload):
-    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=5) as r:
-        return json.loads(r.read().decode())
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
 def mode():
-    with urllib.request.urlopen(BASE+'/api/status',timeout=5) as r:
-        return json.loads(r.read().decode())['mode']
-async def ws_mode_once():
-    async with aiohttp.ClientSession() as s:
-        async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
-            msg = await ws.receive(timeout=3)
-            return json.loads(msg.data)['data']['mode']
+  with urllib.request.urlopen(BASE+'/api/status',timeout=6) as r:
+    return json.load(r)['mode']
+async def ws_once():
+  async with aiohttp.ClientSession() as s:
+    async with s.ws_connect('ws://127.0.0.1:8080/ws', timeout=5) as ws:
+      await ws.receive(timeout=3)
 post('/api/mode', {'mode':'demo'})
-print('refresh', mode())
-print('ws1', asyncio.run(ws_mode_once()))
-print('ws2', asyncio.run(ws_mode_once()))
+print('mode_before', mode())
+asyncio.run(ws_once())
+print('mode_after_reconnect', mode())
 post('/api/mode', {'mode':'manual'})
 PY
 ```
 
-Expected: same mode value from refresh and both websocket reconnects.
+Expected: same mode before and after websocket reconnect.
 
-4. Verify manual + safety gating:
+5. Verify camera topic selection persistence:
 
 ```bash
 python3 - <<'PY'
 import json, time, urllib.request
 BASE='http://127.0.0.1:8080'
 def post(path,payload):
-    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=5) as r:
-        return json.loads(r.read().decode())
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
+def selected():
+  with urllib.request.urlopen(BASE+'/api/status',timeout=6) as r:
+    return json.load(r)['visualizer']['camera']['selected_topic']
+post('/api/camera/select', {'topic':'/oak/rgb/image_raw/compressed'})
+for i in range(5):
+  print(i, selected())
+  time.sleep(0.5)
+PY
+```
+
+Expected: selected topic remains stable over repeated status refreshes.
+
+6. Verify manual safety gating + stop_all:
+
+```bash
+python3 - <<'PY'
+import json, time, urllib.request
+BASE='http://127.0.0.1:8080'
+def post(path,payload):
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=6) as r:
+    return json.load(r)
 post('/api/mode', {'mode':'manual'})
+post('/api/arm', {'armed':False})
+print('disarmed_cmd', post('/api/manual/base', {'type':'motor_bank','left':20,'right':20}))
 post('/api/arm', {'armed':True})
-print('bank_armed', post('/api/motor_bank', {'left':20,'right':20}))
-time.sleep(1.2)
-print('bank_timeout', post('/api/motor_bank', {'left':20,'right':20}))
+print('armed_cmd', post('/api/manual/base', {'type':'motor_bank','left':20,'right':15}))
+time.sleep(1.0)
+print('timeout_cmd', post('/api/manual/base', {'type':'motor_bank','left':20,'right':15}))
 print('stop_all', post('/api/stop_all', {}))
 PY
 ```
 
-Expected: first command accepted, timeout command rejected (`robot_not_armed`), `stop_all` succeeds.
+Expected: disarmed command rejected, armed command accepted, timeout command rejected, stop_all succeeds.
 
-5. Verify lidar + camera topics:
+7. Verify lidar/camera ROS rates:
 
 ```bash
 source /opt/ros/humble/setup.bash
-timeout 6s ros2 topic hz /scan
-timeout 6s ros2 topic hz /oak/rgb/image_rect/compressed
+timeout 8 ros2 topic hz /scan
+# optional camera check (depends on healthy OAK stream)
+timeout 8 ros2 topic hz /oak/rgb/image_raw
 ```
 
-Expected: non-zero rates.
+Expected: `/scan` non-zero; camera non-zero when OAK is publishing.
 
-6. Verify Foxglove bridge socket:
+8. Verify Foxglove bridge socket:
 
 ```bash
 nc -vz 127.0.0.1 8765
@@ -166,16 +230,16 @@ nc -vz 127.0.0.1 8765
 
 Expected: connection succeeded.
 
-7. Verify recording path:
+9. Verify recording:
 
 ```bash
 python3 - <<'PY'
 import json, time, urllib.request
 BASE='http://127.0.0.1:8080'
 def post(path,payload):
-    req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=8) as r:
-        return json.loads(r.read().decode())
+  req=urllib.request.Request(BASE+path,method='POST',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
+  with urllib.request.urlopen(req,timeout=8) as r:
+    return json.load(r)
 print(post('/api/recording/start', {'tags':'stack-test','topics':['/scan']}))
 time.sleep(1.5)
 print(post('/api/recording/stop', {}))
@@ -183,21 +247,26 @@ PY
 ls -1dt ~/robot-sink/data/bags/* | head -n 2
 ```
 
-Expected: recording start/stop returns `ok: true`; new bag directory appears.
+Expected: start/stop `ok: true`, and a new bag path exists.
 
-## Override Launch Commands
+## Troubleshooting
 
-Use env vars to replace defaults with real launches:
+- Foxglove bind conflict on `8765`:
+  `run_stack.sh` now detects pre-bound port and assumes existing bridge instead of crashing stack.
 
-```bash
-OAK_LAUNCH_CMD='ros2 launch depthai_ros_driver camera.launch.py' \
-RPLIDAR_LAUNCH_CMD='ros2 launch rplidar_ros rplidar_a1_launch.py serial_port:=/dev/ttyRPLIDAR' \
-ROARM_CMD='ros2 run roarm_driver roarm_serial_node --ros-args -p port:=/dev/ttyROARM' \
-TASK_STACK_CMD='ros2 launch task_manager bench_demo.launch.py' \
-FOXGLOVE_CMD='ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765' \
-ROBOT_CONSOLE_CMD='ros2 launch robot_console robot_console.launch.py start_foxglove:=false' \
-./jetson/scripts/run_stack.sh
-```
+- OAK camera not streaming (`X_LINK_DEVICE_ALREADY_IN_USE` in `jetson/logs/oakd.log`):
+
+  ```bash
+  pkill -f '[d]epthai_ros_driver camera.launch.py' || true
+  pkill -f '[o]ak_container' || true
+  ./jetson/scripts/run_stack.sh
+  ```
+
+- Stack process collisions from old manual runs:
+
+  ```bash
+  pkill -f '[j]etson/scripts/run_stack.sh' || true
+  ```
 
 ## Enable Boot-Time Service
 
