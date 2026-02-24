@@ -43,6 +43,7 @@ import { LidarCanvas } from "./components/LidarCanvas";
 import { FusedViewCanvas } from "./components/FusedViewCanvas";
 import { CameraDetectionOverlay } from "./components/CameraDetectionOverlay";
 import { DepthHeatmapCanvas } from "./components/DepthHeatmapCanvas";
+import { UnifiedControlPage } from "./components/unified/UnifiedControlPage";
 import { getStatus, postApi } from "./lib/api";
 import { agoUnix, bytes, hz, secAge, timestampToLocal } from "./lib/format";
 import { getCachedCameraTopic, getCachedMode, useConsoleStore } from "./store/useConsoleStore";
@@ -63,7 +64,7 @@ import type {
 const { Header, Content, Sider } = Layout;
 const { Title, Text } = Typography;
 
-type MenuKey = "operations" | "visualizer" | "manual" | "arm" | "training" | "demo" | "logs";
+type MenuKey = "operations" | "visualizer" | "manual" | "unified" | "arm" | "training" | "demo" | "logs";
 type SeverityFilter = "all" | "info" | "warn" | "error";
 
 const MODE_OPTIONS: Array<{ value: RobotMode; label: string }> = [
@@ -725,6 +726,34 @@ export default function App(): JSX.Element {
     messageApi.success(`Mode set to ${modeDraft}`);
   }, [messageApi, modeDraft, refreshStatus, setSelectedMode]);
 
+  const applyModeImmediate = useCallback(
+    async (nextMode: RobotMode) => {
+      try {
+        await postApi("/api/mode", { mode: nextMode });
+        setSelectedMode(nextMode);
+        setModeDraft(nextMode);
+        setModeDirty(false);
+        await refreshStatus();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to set mode";
+        messageApi.error(msg);
+      }
+    },
+    [messageApi, refreshStatus, setSelectedMode],
+  );
+
+  const disarmUnified = useCallback(async () => {
+    try {
+      await postApi("/api/arm", { armed: false });
+      await postApi("/api/manual/base", { type: "stop" });
+      await refreshStatus();
+      messageApi.success("Disarmed");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to disarm";
+      messageApi.error(msg);
+    }
+  }, [messageApi, refreshStatus]);
+
   const applyCameraTopic = useCallback(async () => {
     if (!cameraDraft) {
       return;
@@ -862,6 +891,7 @@ export default function App(): JSX.Element {
     { key: "operations", icon: <DashboardOutlined />, label: "Operations" },
     { key: "visualizer", icon: <RadarChartOutlined />, label: "Visualizer" },
     { key: "manual", icon: <ControlOutlined />, label: "Manual Base" },
+    { key: "unified", icon: <ControlOutlined />, label: "Unified Ctrl" },
     { key: "arm", icon: <RobotOutlined />, label: "Arm Control" },
     { key: "training", icon: <ExperimentOutlined />, label: "Training/Data" },
     { key: "demo", icon: <ToolOutlined />, label: "Demo Runs" },
@@ -1700,6 +1730,8 @@ export default function App(): JSX.Element {
         return renderVisualizer();
       case "manual":
         return renderManual();
+      case "unified":
+        return <UnifiedControlPage status={status} wsConnected={transport.wsConnected} />;
       case "arm":
         return renderArm();
       case "training":
@@ -1713,6 +1745,8 @@ export default function App(): JSX.Element {
         return renderOperations();
     }
   };
+
+  const unifiedArmSafe = transport.wsConnected && Number(status?.arm?.joints?.length || 0) > 0;
 
   return (
     <>
@@ -1733,49 +1767,77 @@ export default function App(): JSX.Element {
         </Sider>
 
         <Layout>
-          <Header className="hmi-header">
-            <div className="hmi-header-left">
-              <Space align="center">
-                <Badge status={transport.wsConnected ? "success" : "error"} text={transport.wsConnected ? "Backend Connected" : transport.wsStateLabel} />
-                <Text type="secondary">Last update: {transport.lastUpdateUnixMs ? new Date(transport.lastUpdateUnixMs).toLocaleTimeString() : "never"}</Text>
-              </Space>
-            </div>
+          <Header className={`hmi-header ${ui.navKey === "unified" ? "unified-header" : ""}`}>
+            {ui.navKey === "unified" ? (
+              <div className="unified-header-inner">
+                <div className="unified-header-title">
+                  <span className="title-main">Robot Console</span>
+                  <span className="title-dot">{"\u2022"}</span>
+                  <span className="title-sub">Unified Control</span>
+                </div>
 
-            <div className="hmi-header-center">
-              <Space>
-                <Select
-                  style={{ minWidth: 190 }}
-                  value={modeDraft}
-                  options={MODE_OPTIONS}
-                  onChange={(value) => {
-                    setModeDraft(value);
-                    setModeDirty(true);
-                  }}
-                />
-                <Button
-                  type="primary"
-                  icon={<ControlOutlined />}
-                  disabled={modeDraft === robot.selectedMode}
-                  onClick={() => runAction("Mode updated", applyMode)}
-                >
-                  Apply Mode
-                </Button>
-              </Space>
-            </div>
+                <div className="unified-header-controls">
+                  <Select
+                    style={{ minWidth: 190 }}
+                    value={robot.selectedMode}
+                    options={MODE_OPTIONS}
+                    onChange={(value) => {
+                      applyModeImmediate(value).catch(() => undefined);
+                    }}
+                  />
+                  <Tag className="unified-top-badge">Base: {status?.safety?.armed ? "ARMED" : "DISARMED"}</Tag>
+                  <Tag className="unified-top-badge">Arm: {unifiedArmSafe ? "SAFE" : "OFFLINE"}</Tag>
+                  <Button className="unified-top-disarm" onClick={() => disarmUnified().catch(() => undefined)}>
+                    DISARM
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="hmi-header-left">
+                  <Space align="center">
+                    <Badge status={transport.wsConnected ? "success" : "error"} text={transport.wsConnected ? "Backend Connected" : transport.wsStateLabel} />
+                    <Text type="secondary">Last update: {transport.lastUpdateUnixMs ? new Date(transport.lastUpdateUnixMs).toLocaleTimeString() : "never"}</Text>
+                  </Space>
+                </div>
 
-            <div className="hmi-header-right">
-              <Space>
-                <Tag color={status?.safety?.armed ? "success" : "default"}>{status?.safety?.armed ? "ARMED" : "DISARMED"}</Tag>
-                <Tag color={status?.safety?.estop_latched ? "error" : "success"}>{status?.safety?.estop_latched ? "E-STOP" : "CLEAR"}</Tag>
-                <Button onClick={toggleRightPanel}>{ui.rightPanelOpen ? "Hide Telemetry" : "Show Telemetry"}</Button>
-              </Space>
-            </div>
+                <div className="hmi-header-center">
+                  <Space>
+                    <Select
+                      style={{ minWidth: 190 }}
+                      value={modeDraft}
+                      options={MODE_OPTIONS}
+                      onChange={(value) => {
+                        setModeDraft(value);
+                        setModeDirty(true);
+                      }}
+                    />
+                    <Button
+                      type="primary"
+                      icon={<ControlOutlined />}
+                      disabled={modeDraft === robot.selectedMode}
+                      onClick={() => runAction("Mode updated", applyMode)}
+                    >
+                      Apply Mode
+                    </Button>
+                  </Space>
+                </div>
+
+                <div className="hmi-header-right">
+                  <Space>
+                    <Tag color={status?.safety?.armed ? "success" : "default"}>{status?.safety?.armed ? "ARMED" : "DISARMED"}</Tag>
+                    <Tag color={status?.safety?.estop_latched ? "error" : "success"}>{status?.safety?.estop_latched ? "E-STOP" : "CLEAR"}</Tag>
+                    <Button onClick={toggleRightPanel}>{ui.rightPanelOpen ? "Hide Telemetry" : "Show Telemetry"}</Button>
+                  </Space>
+                </div>
+              </>
+            )}
           </Header>
 
-          <Content className="hmi-content">{renderPanel()}</Content>
+          <Content className={`hmi-content ${ui.navKey === "unified" ? "hmi-content-unified" : ""}`}>{renderPanel()}</Content>
         </Layout>
 
-        {ui.rightPanelOpen ? (
+        {ui.rightPanelOpen && ui.navKey !== "unified" ? (
           <Sider width={340} theme="dark" className="hmi-right-panel">
             <div className="hmi-right-inner">
               <Title level={5} style={{ color: "#fff", marginTop: 0 }}>Live Telemetry</Title>

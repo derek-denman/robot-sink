@@ -34,7 +34,7 @@ npm run build:web
 
 ## HMI Layout
 
-- Left navigation: Operations, Visualizer, Manual Base, Arm Control, Training/Data, Demo Runs, Logs
+- Left navigation: Operations, Visualizer, Manual Base, Unified Ctrl, Arm Control, Training/Data, Demo Runs, Logs
 - Top bar: transport status, backend-authoritative mode selector, safety tags
 - Right telemetry panel: live safety, sensor FPS/age, storage/temps, nav state, foxglove link
 - Dark-mode Ant Design UI with keyboard/manual controls
