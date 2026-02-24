@@ -27,6 +27,101 @@ BeagleBone GPIO48 (candidate P9_15) --------> Sabertooth 2x60 S2 (stop/inhibit)
 BeagleBone GND ------------------------------> Sabertooth COM/0V (common reference)
 ```
 
+```mermaid
+flowchart LR
+
+subgraph PWR["POWER TREE (12V nominal)"]
+  BATT["Battery: Bioenno BLF-1230A"]
+  SW["Main switch: Blue Sea 6006"]
+  ANL["ANL fuse: Blue Sea 5005 + 5125 (100A)"]
+  BUSP["+12V bus: Blue Sea 2301"]
+  BUSN["0V star return bus"]
+
+  BATT -->|"+"| SW --> ANL --> BUSP
+  BATT -->|"-"| BUSN
+
+  BUSP -->|"Drivetrain branch (fuse UNKNOWN)"| ST_BPLUS["Sabertooth B+"]
+  BUSN -->|"Return"| ST_BMINUS["Sabertooth B-"]
+
+  BUSP -->|"Compute branch (connector/pinout UNKNOWN)"| JET_PWR["Jetson carrier power IN (UNKNOWN)"]
+  BUSN -->|"Return"| JET_GND["Jetson GND"]
+
+  BUSP -->|"Arm branch (fuse/connector UNKNOWN)"| ARM_PWR["RoArm 12V IN (UNKNOWN)"]
+  BUSN -->|"Return"| ARM_GND["RoArm GND"]
+
+  BUSP -->|"Logic branch (path/fuse UNKNOWN)"| DCDC5["Mean Well DDR-60G-5 (5V rail)"]
+  BUSN --- DCDC5
+
+  DCDC5 -->|"5V out"| BBB_5V["BBB 5V supply path (UNKNOWN)"]
+  BUSN --- BBB_GND["BBB GND"]
+
+  DCDC5 -->|"5V out"| ENC_5V["Encoders Vcc (5V domain)"]
+  BUSN --- ENC_GND["Encoders GND"]
+end
+
+subgraph CMP["COMPUTE + USB DEVICES"]
+  JET["Jetson Orin NX on Waveshare carrier"]
+  OAK["OAK-D Lite (USB 3.x)"]
+  RPL["RPLIDAR (USB-Serial) /dev/ttyRPLIDAR"]
+  ROARM_USB["RoArm (USB-Serial) /dev/ttyROARM"]
+  BBB_USB["BBB USB gadget net: 192.168.7.2"]
+end
+
+JET_PWR --> JET
+JET_GND --- JET
+
+JET -->|"USB 3.x"| OAK
+JET -->|"USB serial"| RPL
+JET -->|"USB serial"| ROARM_USB
+JET <-->|"USB networking 192.168.7.1 <-> 192.168.7.2"| BBB_USB
+
+subgraph BASE["BASE CONTROL + ENCODERS"]
+  BBB["BeagleBone Green Gateway (P8/P9)"]
+  LVC["74LVC245A level buffer (8ch) 5V -> 3.3V"]
+end
+
+BBB_5V --> BBB
+BBB_GND --- BBB
+
+ENC_5V --> LVC
+ENC_GND --- LVC
+
+LVC -->|"wheel0_A -> P8_45 (pru0_r31_0)"| BBB
+LVC -->|"wheel0_B -> P8_46 (pru0_r31_1)"| BBB
+LVC -->|"wheel1_A -> P8_43 (pru0_r31_2)"| BBB
+LVC -->|"wheel1_B -> P8_44 (pru0_r31_3)"| BBB
+LVC -->|"wheel2_A -> P8_41 (pru0_r31_4)"| BBB
+LVC -->|"wheel2_B -> P8_42 (pru0_r31_5)"| BBB
+LVC -->|"wheel3_A -> P8_39 (pru0_r31_6)"| BBB
+LVC -->|"wheel3_B -> P8_40 (pru0_r31_7)"| BBB
+
+subgraph DRIVE["DRIVETRAIN"]
+  ST["Sabertooth 2x60 (packetized serial 38400 addr 128)"]
+  LEFTBANK["Left bank: 2 motors in parallel (split UNKNOWN)"]
+  RIGHTBANK["Right bank: 2 motors in parallel (split UNKNOWN)"]
+end
+
+ST_BPLUS -->|"B+"| ST
+ST_BMINUS -->|"B-"| ST
+
+BBB_GND ---|"COM/0V common reference"| ST
+
+BBB -->|"PRU1 TX candidate P9_31 -> S1"| ST
+BBB -->|"GPIO48 stop candidate P9_15 -> S2"| ST
+
+ST -->|"M1"| LEFTBANK
+ST -->|"M2"| RIGHTBANK
+
+subgraph SAFETY["SAFETY (PARTIALLY UNKNOWN)"]
+  ESTOP["IDEC E-stop (wiring behavior UNKNOWN)"]
+  ESTOP_IN["BBB physical E-stop input pin UNKNOWN"]
+end
+
+ESTOP -.->|"TBD: cut power and/or assert S2"| ST
+ESTOP -.->|"TBD: cut arm power"| ARM_PWR
+ESTOP_IN -.-> BBB
+```
+
 ## Bill of Materials (BOM)
 | Subsystem | Item | Manufacturer | Exact Model | Qty | Key Electrical Specs | Connector Type | Vendor/Manual URL | Mounting/Accessory Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
