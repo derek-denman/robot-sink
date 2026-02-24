@@ -91,9 +91,10 @@ Robot Console is hosted on the Jetson and served by the `robot_console` ROS back
 - Open from Mac/Linux/Windows browser: `http://JETSON_IP:8080`
 - Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
 - Built-in visualizer:
-  - live 2D occupancy map (`/map`) with `/scan` + robot pose + path overlays
-  - live 3D point-cloud view (`PointCloud2`, topic-selectable)
-  - OAK-D MJPEG stream + FPS/age status
+  - 3-panel Waymo-style layout (Fused View, Minimap, OAK-D RGB overlays)
+  - raw debug feeds for OAK RGB + LiDAR
+  - TF-aware fallback rendering (sensor-centric when TF/odom are missing)
+  - temporary manual extrinsics UI for debug-only alignment
 - Foxglove bridge: `ws://JETSON_IP:8765`
 - UI source: `jetson/console/ui/` (React + TypeScript + Ant Design)
 - Runtime assets served from: `jetson/console/web/`
@@ -108,6 +109,23 @@ Then connect Foxglove to `ws://localhost:8765`.
 
 See `jetson/console/README.md` for controls, configuration, and troubleshooting.
 Sensor placement prerequisites are in `jetson/docs/05_usb_devices_and_udev.md`.
+
+### 5b) TF bringup for accurate moving map
+
+`base_bringup` now provides Jetson-side odometry/TF publishing:
+
+- `bbb_odom_tf_bridge`: polls BBB `/api/status`, publishes `/odom` and TF `odom->base_link`
+- static TF launch for `base_link->laser` and `base_link->oak-d-base-frame`
+
+Run:
+
+```bash
+ros2 launch base_bringup base_tf.launch.py
+```
+
+Configure via:
+
+- `ros_ws/src/base_bringup/config/base_bringup.yaml`
 
 ### 6) Optional boot-time service
 

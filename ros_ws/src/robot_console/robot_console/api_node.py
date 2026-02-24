@@ -41,6 +41,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "scan_push_hz": 8.0,
         "map_push_hz": 2.0,
         "pointcloud_push_hz": 4.0,
+        "depth_push_hz": 6.0,
+        "detections_push_hz": 10.0,
         "camera_stream_hz": 12.0,
         "scan_overlay_points": 520,
         "pointcloud_max_points": 4500,
@@ -66,10 +68,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "odom": "/odom",
         "tf": "/tf",
         "tf_static": "/tf_static",
+        "fixed_frame": "odom",
         "map_frame": "map",
         "base_frame": "base_link",
         "path_topics": ["/plan", "/global_plan", "/local_plan"],
         "pointcloud": "",
+        "rgb": "/oak/rgb/image_raw",
+        "depth": "/oak/stereo/image_raw",
+        "detections": "/oak/nn/spatial_detections",
+        "camera_info": "/oak/rgb/camera_info",
         "camera_topics": ["/oak/rgb/image_raw", "/oak/stereo/image_raw"],
         "camera_compressed_topics": ["/oak/rgb/image_rect/compressed"],
         "camera_stream_topic": "/oak/rgb/image_rect/compressed",
@@ -200,12 +207,26 @@ class RobotConsoleApiNode(Node):
         self._pointcloud_push_period = 1.0 / pointcloud_push_hz
         self._last_pointcloud_push_stamp = 0.0
 
+        depth_push_hz = float(self._config.get("streaming", {}).get("depth_push_hz", 6.0))
+        depth_push_hz = max(0.5, min(15.0, depth_push_hz))
+        self._depth_push_period = 1.0 / depth_push_hz
+        self._last_depth_push_stamp = 0.0
+
+        detections_push_hz = float(self._config.get("streaming", {}).get("detections_push_hz", 10.0))
+        detections_push_hz = max(1.0, min(20.0, detections_push_hz))
+        self._detections_push_period = 1.0 / detections_push_hz
+        self._last_detections_push_stamp = 0.0
+
         self._heartbeat_timer = self.create_timer(0.1, self._watchdog_tick)
         self._status_timer = self.create_timer(0.4, self._status_tick)
         self._scan_timer = self.create_timer(self._scan_push_period, self._scan_tick)
         self._map_timer = self.create_timer(self._map_push_period, self._map_tick)
         self._pointcloud_timer = self.create_timer(
             self._pointcloud_push_period, self._pointcloud_tick
+        )
+        self._depth_timer = self.create_timer(self._depth_push_period, self._depth_tick)
+        self._detections_timer = self.create_timer(
+            self._detections_push_period, self._detections_tick
         )
 
         self.get_logger().info(
@@ -266,8 +287,13 @@ class RobotConsoleApiNode(Node):
 
         scan_status = self.adapters.scan_stream_status()
         camera_status = self.adapters.camera_stream_status()
+        rgb_status = self.adapters.rgb_raw_status()
+        depth_status = self.adapters.depth_stream_status()
+        detection_status = self.adapters.detection_stream_status()
         map_status = self.adapters.map_stream_status()
         pointcloud_status = self.adapters.pointcloud_stream_status()
+        tf_health = self.adapters.tf_health_status()
+        topic_catalog = self.adapters.topic_catalog()
         adapter_caps = self.adapters.capabilities()
         switch_localization_cmd = (
             self._config.get("mapping", {}).get("switch_to_localization_cmd", "").strip()
@@ -307,8 +333,13 @@ class RobotConsoleApiNode(Node):
             "visualizer": {
                 "scan": scan_status,
                 "camera": camera_status,
+                "rgb": rgb_status,
+                "depth": depth_status,
+                "detections": detection_status,
                 "map": map_status,
                 "pointcloud": pointcloud_status,
+                "tf": tf_health,
+                "topic_catalog": topic_catalog,
             },
             "logs": {
                 "sources": self.log_catalog.list_sources(),
@@ -328,6 +359,9 @@ class RobotConsoleApiNode(Node):
                 "nav_cancel": adapter_caps.get("nav_cancel", False),
                 "clear_costmaps": adapter_caps.get("clear_costmaps", False),
                 "camera_stream_connected": camera_status.get("connected", False),
+                "rgb_stream_connected": rgb_status.get("connected", False),
+                "depth_stream_connected": depth_status.get("connected", False),
+                "detections_stream_connected": detection_status.get("connected", False),
                 "map_stream_connected": map_status.get("connected", False),
                 "pointcloud_stream_connected": pointcloud_status.get("connected", False),
                 "stack_start_reason": "" if self.stack_command_available("start_cmd") else "stack_start_not_available",
@@ -409,6 +443,30 @@ class RobotConsoleApiNode(Node):
         self._last_pointcloud_push_stamp = stamp
         self._queue_pointcloud_push(payload)
 
+    def _depth_tick(self) -> None:
+        payload = self.adapters.latest_depth_snapshot()
+        if not payload:
+            return
+
+        stamp = float(payload.get("stamp_unix", 0.0))
+        if stamp <= 0.0 or stamp <= self._last_depth_push_stamp:
+            return
+
+        self._last_depth_push_stamp = stamp
+        self._queue_depth_push(payload)
+
+    def _detections_tick(self) -> None:
+        payload = self.adapters.latest_detection_snapshot()
+        if not payload:
+            return
+
+        stamp = float(payload.get("stamp_unix", 0.0))
+        if stamp <= 0.0 or stamp <= self._last_detections_push_stamp:
+            return
+
+        self._last_detections_push_stamp = stamp
+        self._queue_detections_push(payload)
+
     def _queue_coro(self, coro: Any) -> None:
         if not self._loop:
             return
@@ -441,6 +499,16 @@ class RobotConsoleApiNode(Node):
         if not self._ws_clients:
             return
         self._queue_coro(self.broadcast_event("pointcloud", payload))
+
+    def _queue_depth_push(self, payload: Dict[str, Any]) -> None:
+        if not self._ws_clients:
+            return
+        self._queue_coro(self.broadcast_event("depth", payload))
+
+    def _queue_detections_push(self, payload: Dict[str, Any]) -> None:
+        if not self._ws_clients:
+            return
+        self._queue_coro(self.broadcast_event("detections", payload))
 
     async def broadcast_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         if not self._ws_clients:
@@ -758,14 +826,22 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
     async def get_streams(_request: web.Request) -> web.Response:
         scan_status = node.adapters.scan_stream_status()
         camera_status = node.adapters.camera_stream_status()
+        rgb_status = node.adapters.rgb_raw_status()
+        depth_status = node.adapters.depth_stream_status()
+        detection_status = node.adapters.detection_stream_status()
         map_status = node.adapters.map_stream_status()
         pointcloud_status = node.adapters.pointcloud_stream_status()
         return _app_response(
             True,
             scan=scan_status,
             camera=camera_status,
+            rgb=rgb_status,
+            depth=depth_status,
+            detections=detection_status,
             map=map_status,
             pointcloud=pointcloud_status,
+            tf=node.adapters.tf_health_status(),
+            topic_catalog=node.adapters.topic_catalog(),
             selected_topic=camera_status.get("selected_topic"),
             topics=camera_status.get("available_topics", []),
         )
@@ -783,6 +859,12 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
     async def set_map_config(request: web.Request) -> web.Response:
         payload = await _json_request(request)
         result = node.adapters.configure_map(payload)
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def set_visualizer_config(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        result = node.adapters.configure_visualizer(payload)
         node._queue_status_push()
         return _app_response(result.get("ok", False), result=result)
 
@@ -1311,6 +1393,14 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         if pointcloud:
             await ws.send_json({"type": "pointcloud", "data": pointcloud})
 
+        depth = node.adapters.latest_depth_snapshot()
+        if depth:
+            await ws.send_json({"type": "depth", "data": depth})
+
+        detections = node.adapters.latest_detection_snapshot()
+        if detections:
+            await ws.send_json({"type": "detections", "data": detections})
+
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -1429,6 +1519,7 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
     app.router.add_post("/api/camera/select", set_camera_topic)
     app.router.add_post("/api/map/config", set_map_config)
     app.router.add_post("/api/pointcloud/select", set_pointcloud_topic)
+    app.router.add_post("/api/visualizer/config", set_visualizer_config)
     app.router.add_post("/api/mode", set_mode)
 
     app.router.add_post("/api/safety/arm", arm)

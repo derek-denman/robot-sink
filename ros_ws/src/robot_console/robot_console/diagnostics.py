@@ -15,10 +15,13 @@ class DiagnosticsProvider:
 
     def health_summary(self) -> Dict[str, Any]:
         rates = self._adapters.topic_rates()
-        tf_ok = self._adapters.tf_has_required_frames(["map", "odom", "base_link"])
+        tf_health = self._adapters.tf_health_status()
+        tf_ok = bool(tf_health.get("scan_to_fixed_ok", False))
         odom_age = self._adapters.topic_age_sec("odom")
         scan_age = self._adapters.topic_age_sec("scan")
         camera_age = self._adapters.topic_age_sec("camera")
+        depth_age = self._adapters.topic_age_sec("depth")
+        detections_age = self._adapters.topic_age_sec("detections")
         camera_stream = self._adapters.camera_stream_status()
         scan_stream = self._adapters.scan_stream_status()
 
@@ -30,15 +33,20 @@ class DiagnosticsProvider:
             "lidar_rate_hz": rates.get("scan", 0.0),
             "odom_rate_hz": rates.get("odom", 0.0),
             "oak_rate_hz": rates.get("camera", 0.0),
+            "depth_rate_hz": rates.get("depth", 0.0),
+            "detections_rate_hz": rates.get("detections", 0.0),
             "camera_stream_rate_hz": rates.get(
                 f"camera_stream:{camera_stream.get('selected_topic', '')}", 0.0
             ),
             "scan_age_sec": scan_age,
             "odom_age_sec": odom_age,
             "camera_age_sec": camera_age,
+            "depth_age_sec": depth_age,
+            "detections_age_sec": detections_age,
             "camera_stream_age_sec": camera_stream.get("age_sec"),
             "scan_stream_connected": scan_stream.get("connected", False),
             "camera_stream_connected": camera_stream.get("connected", False),
+            "tf_health": tf_health,
             "nav": self._adapters.navigation_status(),
         }
 

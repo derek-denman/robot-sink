@@ -104,6 +104,32 @@ body {
   object-fit: cover;
 }
 
+.camera-overlay-frame {
+  min-height: 340px;
+}
+
+.camera-overlay-frame img {
+  min-height: 340px;
+}
+
+.camera-overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.camera-depth-overlay {
+  mix-blend-mode: screen;
+}
+
+.camera-detection-overlay text {
+  paint-order: stroke;
+  stroke: rgba(18, 10, 24, 0.75);
+  stroke-width: 0.003;
+}
+
 .map-canvas,
 .pointcloud-canvas {
   width: 100%;

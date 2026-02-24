@@ -13,6 +13,8 @@ streaming:
   scan_push_hz: 8.0
   map_push_hz: 2.0
   pointcloud_push_hz: 4.0
+  depth_push_hz: 6.0
+  detections_push_hz: 10.0
   camera_stream_hz: 12.0
   scan_overlay_points: 520
   pointcloud_max_points: 4500
@@ -61,8 +63,13 @@ topics:
   odom: /odom
   tf: /tf
   tf_static: /tf_static
+  fixed_frame: odom
   map_frame: map
   base_frame: base_link
+  rgb: /oak/rgb/image_raw
+  depth: /oak/stereo/image_raw
+  detections: /oak/nn/spatial_detections
+  camera_info: /oak/rgb/camera_info
   path_topics:
     - /plan
     - /global_plan

@@ -35,7 +35,8 @@ export ROBOT_ROOT="${ROBOT_ROOT:-${REPO_ROOT}}"
 ROBOT_CONSOLE_CONFIG="${ROBOT_CONSOLE_CONFIG:-${ROBOT_ROOT}/jetson/console/console_config.yaml}"
 ROBOT_CONSOLE_WEB_ROOT="${ROBOT_CONSOLE_WEB_ROOT:-${ROBOT_ROOT}/jetson/console/web}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
-export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT
+BASE_BRINGUP_CONFIG="${BASE_BRINGUP_CONFIG:-${ROBOT_ROOT}/ros_ws/src/base_bringup/config/base_bringup.yaml}"
+export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT BASE_BRINGUP_CONFIG
 
 mkdir -p "${LOG_DIR}"
 
@@ -67,6 +68,29 @@ fi
 if [[ -f "${REPO_ROOT}/ros_ws/install/setup.bash" ]]; then
   safe_source "${REPO_ROOT}/ros_ws/install/setup.bash"
   log "Sourced ros_ws install/setup.bash"
+fi
+
+prepend_path_unique() {
+  local var_name="$1"
+  local value="$2"
+  local current="${!var_name:-}"
+  case ":${current}:" in
+    *":${value}:"*) return 0 ;;
+  esac
+  if [[ -n "${current}" ]]; then
+    export "${var_name}=${value}:${current}"
+  else
+    export "${var_name}=${value}"
+  fi
+}
+
+# Colcon isolated installs can miss AMENT_PREFIX_PATH entries in some shells.
+if [[ -d "${REPO_ROOT}/ros_ws/install" ]]; then
+  for pkg_prefix in "${REPO_ROOT}"/ros_ws/install/*; do
+    [[ -d "${pkg_prefix}/share" ]] || continue
+    prepend_path_unique AMENT_PREFIX_PATH "${pkg_prefix}"
+    prepend_path_unique COLCON_PREFIX_PATH "${pkg_prefix}"
+  done
 fi
 
 PIDS=()
@@ -208,7 +232,11 @@ else
   start_cmd "task" "python3 ${SCRIPT_DIR}/runtime_stub.py --name task-stack --hint 'Task stack placeholder running'"
 fi
 
-if [[ -n "${BB_BRIDGE_CMD:-}" ]]; then
+if [[ -n "${BASE_BRINGUP_CMD:-}" ]]; then
+  start_cmd "base-bringup" "${BASE_BRINGUP_CMD}"
+elif ros_pkg_exists base_bringup; then
+  start_cmd "base-bringup" "$(retry_loop_cmd "base-bringup" "ros2 launch base_bringup base_tf.launch.py config_file:=${BASE_BRINGUP_CONFIG}" 3)"
+elif [[ -n "${BB_BRIDGE_CMD:-}" ]]; then
   start_cmd "bb-bridge" "${BB_BRIDGE_CMD}"
 else
   start_cmd "bb-bridge" "python3 ${SCRIPT_DIR}/bb_bridge_stub.py --host ${BB_HOST:-192.168.7.2} --port ${BB_PORT:-8765}"

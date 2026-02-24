@@ -18,7 +18,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import CompressedImage, Image, LaserScan, PointCloud2
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image, LaserScan, PointCloud2
 from std_msgs.msg import String
 from std_srvs.srv import Empty
 from tf2_msgs.msg import TFMessage
@@ -37,6 +37,11 @@ try:
     from slam_toolbox.srv import SaveMap
 except ImportError:  # pragma: no cover
     SaveMap = None
+
+try:
+    from vision_msgs.msg import Detection3DArray
+except ImportError:  # pragma: no cover
+    Detection3DArray = None
 
 
 class RateTracker:
@@ -88,17 +93,28 @@ class RosAdapters:
         self._tf_frames: set[str] = set()
         self._tf_graph: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(dict)
 
-        self._scan_topic = topics.get("scan", "/scan")
-        self._odom_topic = topics.get("odom", "/odom")
-        self._map_topic = topics.get("map", "/map")
-        self._map_frame = topics.get("map_frame", "map")
-        self._base_frame = topics.get("base_frame", "base_link")
-        self._camera_topics = topics.get("camera_topics", []) or [topics.get("camera", "/oak/rgb/image_raw")]
+        self._scan_topic = str(topics.get("scan", "/scan")).strip() or "/scan"
+        self._odom_topic = str(topics.get("odom", "/odom")).strip() or "/odom"
+        self._map_topic = str(topics.get("map", "/map")).strip() or "/map"
+        self._map_frame = str(topics.get("map_frame", "map")).strip().strip("/") or "map"
+        self._base_frame = str(topics.get("base_frame", "base_link")).strip().strip("/") or "base_link"
+        self._rgb_topic = str(
+            topics.get("rgb", topics.get("camera", "/oak/rgb/image_raw"))
+        ).strip() or "/oak/rgb/image_raw"
+        self._depth_topic = str(topics.get("depth", "/oak/stereo/image_raw")).strip() or "/oak/stereo/image_raw"
+        self._detection_topic = str(topics.get("detections", "/oak/nn/spatial_detections")).strip()
+        self._camera_info_topic = str(topics.get("camera_info", "/oak/rgb/camera_info")).strip()
+        configured_camera_topics = topics.get("camera_topics", []) or []
+        self._camera_topics = self._unique_topics(
+            [self._rgb_topic, self._depth_topic] + list(configured_camera_topics)
+        )
         self._tf_topic = topics.get("tf", "/tf")
         self._tf_static_topic = topics.get("tf_static", "/tf_static")
+        self._fixed_frame_candidates = ["map", "odom", "base_link"]
+        self._selected_fixed_frame = str(topics.get("fixed_frame", "")).strip().strip("/")
         configured_path_topics = topics.get("path_topics", [])
         if not configured_path_topics:
-            configured_path_topics = [topics.get("path", "/plan"), "/plan", "/global_plan"]
+            configured_path_topics = [topics.get("path", "/plan"), "/plan", "/global_plan", "/local_plan"]
         self._path_topics = self._unique_topics(configured_path_topics)
         self._selected_path_topic = topics.get("path_topic", "") or (
             self._path_topics[0] if self._path_topics else ""
@@ -108,12 +124,8 @@ class RosAdapters:
         self._pointcloud_max_points = int(config.get("streaming", {}).get("pointcloud_max_points", 4500))
         self._scan_overlay_points = int(config.get("streaming", {}).get("scan_overlay_points", 520))
 
-        self._scan_sub = node.create_subscription(
-            LaserScan,
-            self._scan_topic,
-            self._on_scan,
-            qos_profile_sensor_data,
-        )
+        self._scan_sub: Any = None
+        self.ensure_scan_subscription(self._scan_topic)
         self._odom_sub = node.create_subscription(Odometry, self._odom_topic, self._on_odom, 10)
         self._map_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -124,8 +136,14 @@ class RosAdapters:
         self._map_sub = None
         self._set_map_subscription(self._map_topic)
         self._tf_sub = node.create_subscription(TFMessage, self._tf_topic, self._on_tf, 30)
+        self._tf_static_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=50,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self._tf_static_sub = node.create_subscription(
-            TFMessage, self._tf_static_topic, self._on_tf_static, 30
+            TFMessage, self._tf_static_topic, self._on_tf_static, self._tf_static_qos
         )
 
         self._path_subs: Dict[str, Any] = {}
@@ -139,16 +157,9 @@ class RosAdapters:
         if self._pointcloud_topic:
             self.ensure_pointcloud_subscription(self._pointcloud_topic)
 
-        self._camera_subs = []
+        self._camera_raw_subs: Dict[str, Any] = {}
         for topic in self._camera_topics:
-            self._camera_subs.append(
-                node.create_subscription(
-                    Image,
-                    topic,
-                    self._make_camera_callback(topic),
-                    qos_profile_sensor_data,
-                )
-            )
+            self.ensure_camera_raw_subscription(topic)
 
         self._camera_stream_subs: Dict[str, Any] = {}
         self._camera_stream_frames: Dict[str, Dict[str, Any]] = {}
@@ -166,6 +177,13 @@ class RosAdapters:
 
         for topic in default_stream_topics:
             self.ensure_camera_stream_subscription(topic)
+
+        self._camera_info_sub: Any = None
+        self._set_camera_info_subscription(self._camera_info_topic)
+
+        self._detection_sub: Any = None
+        if Detection3DArray is not None and self._detection_topic:
+            self.ensure_detection_subscription(self._detection_topic)
 
         nav_goal_topic = topics.get("navigate_to_pose", "/navigate_to_pose")
         self._nav_client = None
@@ -209,6 +227,16 @@ class RosAdapters:
         self._latest_scan_payload: Optional[Dict[str, Any]] = None
         self._map_payload_lock = threading.Lock()
         self._latest_map_payload: Optional[Dict[str, Any]] = None
+        self._camera_raw_lock = threading.Lock()
+        self._camera_raw_state: Dict[str, Dict[str, Any]] = {}
+        self._latest_camera_info_lock = threading.Lock()
+        self._latest_camera_info: Optional[Dict[str, Any]] = None
+        self._latest_odom_lock = threading.Lock()
+        self._latest_odom_pose: Optional[Dict[str, Any]] = None
+        self._latest_detection_payload_lock = threading.Lock()
+        self._latest_detection_payload: Optional[Dict[str, Any]] = None
+        self._latest_depth_payload_lock = threading.Lock()
+        self._latest_depth_payload: Optional[Dict[str, Any]] = None
 
         self._bank_linear_scale = float(manual_cfg.get("bank_linear_scale", 0.8))
         self._bank_angular_scale = float(manual_cfg.get("bank_angular_scale", 1.7))
@@ -265,6 +293,121 @@ class RosAdapters:
         except Exception:
             return []
         return sorted(self._unique_topics(topics))
+
+    def _publisher_count(self, topic_name: str) -> int:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return 0
+        try:
+            return len(self._node.get_publishers_info_by_topic(topic_name))
+        except Exception:
+            return 0
+
+    def _topic_options(self, ros_type: str, selected: str = "", defaults: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+        candidates = []
+        if defaults:
+            candidates.extend(list(defaults))
+        if selected:
+            candidates.append(selected)
+        candidates.extend(self._discover_topics(ros_type))
+        topics = self._unique_topics(candidates)
+        return [
+            {
+                "topic": topic,
+                "publisher_count": self._publisher_count(topic),
+            }
+            for topic in topics
+        ]
+
+    def ensure_scan_subscription(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        if self._scan_sub is not None and self._scan_topic == topic_name:
+            return {"ok": True, "topic": topic_name}
+
+        if self._scan_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._scan_sub)
+            self._scan_sub = None
+
+        self._scan_sub = self._node.create_subscription(
+            LaserScan,
+            topic_name,
+            self._on_scan,
+            qos_profile_sensor_data,
+        )
+        self._scan_topic = topic_name
+        return {"ok": True, "topic": topic_name}
+
+    def ensure_camera_raw_subscription(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        if topic_name in self._camera_raw_subs:
+            return {"ok": True, "topic": topic_name}
+
+        self._camera_raw_subs[topic_name] = self._node.create_subscription(
+            Image,
+            topic_name,
+            self._make_camera_callback(topic_name),
+            qos_profile_sensor_data,
+        )
+        if topic_name not in self._camera_topics:
+            self._camera_topics.append(topic_name)
+        return {"ok": True, "topic": topic_name}
+
+    def _derive_camera_info_topic(self, rgb_topic: str) -> str:
+        topic = (rgb_topic or "").strip()
+        if not topic:
+            return ""
+        if topic.endswith("/image_raw"):
+            return topic.replace("/image_raw", "/camera_info")
+        if topic.endswith("/image_rect"):
+            return topic.replace("/image_rect", "/camera_info")
+        if topic.endswith("/compressed"):
+            return topic.replace("/compressed", "/camera_info")
+        return topic.rstrip("/") + "/camera_info"
+
+    def _set_camera_info_subscription(self, topic_name: str) -> None:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return
+        if self._camera_info_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._camera_info_sub)
+            self._camera_info_sub = None
+        self._camera_info_topic = topic_name
+        self._camera_info_sub = self._node.create_subscription(
+            CameraInfo,
+            topic_name,
+            self._on_camera_info,
+            qos_profile_sensor_data,
+        )
+
+    def ensure_detection_subscription(self, topic_name: str) -> Dict[str, Any]:
+        if Detection3DArray is None:
+            return {"ok": False, "error": "vision_msgs_unavailable"}
+
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        if self._detection_sub is not None and self._detection_topic == topic_name:
+            return {"ok": True, "topic": topic_name}
+
+        if self._detection_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._detection_sub)
+            self._detection_sub = None
+
+        self._detection_sub = self._node.create_subscription(
+            Detection3DArray,
+            topic_name,
+            self._on_detections,
+            qos_profile_sensor_data,
+        )
+        self._detection_topic = topic_name
+        return {"ok": True, "topic": topic_name}
 
     def _set_map_subscription(self, topic_name: str) -> None:
         topic_name = (topic_name or "").strip()
@@ -364,15 +507,25 @@ class RosAdapters:
 
             angle += msg.angle_increment
 
-        map_points = self._scan_points_in_map(msg.header.frame_id, points, max_points=self._scan_overlay_points)
+        map_points, _ = self._scan_points_in_frame(
+            self._map_frame,
+            msg.header.frame_id,
+            points,
+            max_points=self._scan_overlay_points,
+        )
 
         return {
             "stamp_unix": time.time(),
             "frame_id": msg.header.frame_id,
+            "sample_count": count,
+            "angle_min": round(float(msg.angle_min), 6),
+            "angle_max": round(float(msg.angle_max), 6),
+            "angle_increment": round(float(msg.angle_increment), 6),
             "range_min": round(float(msg.range_min), 4),
             "range_max": round(float(msg.range_max), 4),
             "point_count": len(points),
             "points": points,
+            "ranges_preview": [round(float(v), 4) for v in list(msg.ranges[:24])],
             "map_frame": self._map_frame,
             "point_count_map": len(map_points),
             "points_map": map_points,
@@ -563,8 +716,179 @@ class RosAdapters:
             "source_points": total,
         }
 
-    def _on_odom(self, _msg: Odometry) -> None:
+    def _camera_projection_info(self) -> Optional[Dict[str, Any]]:
+        with self._latest_camera_info_lock:
+            if self._latest_camera_info is None:
+                return None
+            return dict(self._latest_camera_info)
+
+    def _project_detection_marker(
+        self,
+        camera_info: Optional[Dict[str, Any]],
+        x: float,
+        y: float,
+        z: float,
+        size_x: float,
+        size_y: float,
+    ) -> Optional[Dict[str, float]]:
+        if camera_info is None:
+            return None
+        if z <= 0.02:
+            return None
+        fx = float(camera_info.get("fx", 0.0))
+        fy = float(camera_info.get("fy", 0.0))
+        cx = float(camera_info.get("cx", 0.0))
+        cy = float(camera_info.get("cy", 0.0))
+        width = float(camera_info.get("width", 0.0))
+        height = float(camera_info.get("height", 0.0))
+        if fx <= 0.0 or fy <= 0.0 or width <= 0.0 or height <= 0.0:
+            return None
+
+        u = fx * (x / z) + cx
+        v = fy * (y / z) + cy
+        rect_w = abs(fx * max(0.001, size_x) / z)
+        rect_h = abs(fy * max(0.001, size_y) / z)
+        return {
+            "u": round(float(u), 2),
+            "v": round(float(v), 2),
+            "u_norm": round(float(u / width), 5),
+            "v_norm": round(float(v / height), 5),
+            "rect_w": round(float(rect_w), 2),
+            "rect_h": round(float(rect_h), 2),
+            "frame_width": int(width),
+            "frame_height": int(height),
+        }
+
+    def _extract_detection_label(self, detection: Any, fallback_idx: int) -> tuple[str, float]:
+        class_id = ""
+        score = 0.0
+        results = list(getattr(detection, "results", []) or [])
+        if results:
+            hypothesis = getattr(results[0], "hypothesis", results[0])
+            class_id = str(getattr(hypothesis, "class_id", "") or "")
+            try:
+                score = float(getattr(hypothesis, "score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+        if not class_id:
+            class_id = str(getattr(detection, "id", "") or f"det_{fallback_idx}")
+        return class_id, score
+
+    def _build_detection_payload(self, msg: Any, max_items: int = 120) -> Dict[str, Any]:
+        frame_id = (msg.header.frame_id or "").strip("/")
+        fixed_frame, warnings = self._resolve_fixed_frame()
+        tf_to_fixed = self.lookup_transform(fixed_frame, frame_id) if frame_id else None
+        resolved_in_fixed = frame_id == fixed_frame or tf_to_fixed is not None
+
+        if not resolved_in_fixed and frame_id and fixed_frame:
+            warnings = list(warnings) + [f"Missing TF: cannot transform {frame_id} to {fixed_frame}"]
+
+        camera_info = self._camera_projection_info()
+        detections_payload: List[Dict[str, Any]] = []
+
+        for idx, detection in enumerate(list(msg.detections)[:max_items]):
+            bbox = getattr(detection, "bbox", None)
+            center = getattr(bbox, "center", None)
+            pos = getattr(center, "position", None)
+            orient = getattr(center, "orientation", None)
+            size = getattr(bbox, "size", None)
+            if pos is None or size is None:
+                continue
+
+            x = float(getattr(pos, "x", 0.0))
+            y = float(getattr(pos, "y", 0.0))
+            z = float(getattr(pos, "z", 0.0))
+            size_x = max(0.01, float(getattr(size, "x", 0.0)))
+            size_y = max(0.01, float(getattr(size, "y", 0.0)))
+            size_z = max(0.01, float(getattr(size, "z", 0.0)))
+            yaw = 0.0
+            if orient is not None:
+                yaw = self._quat_to_yaw(
+                    float(getattr(orient, "x", 0.0)),
+                    float(getattr(orient, "y", 0.0)),
+                    float(getattr(orient, "z", 0.0)),
+                    float(getattr(orient, "w", 1.0)),
+                )
+            class_id, score = self._extract_detection_label(detection, idx)
+
+            if resolved_in_fixed:
+                tf = tf_to_fixed or {"x": 0.0, "y": 0.0, "yaw": 0.0}
+                cos_yaw = math.cos(float(tf.get("yaw", 0.0)))
+                sin_yaw = math.sin(float(tf.get("yaw", 0.0)))
+                fx = float(tf.get("x", 0.0)) + cos_yaw * x - sin_yaw * y
+                fy = float(tf.get("y", 0.0)) + sin_yaw * x + cos_yaw * y
+                fyaw = self._normalize_angle(yaw + float(tf.get("yaw", 0.0)))
+                render_frame = fixed_frame
+            else:
+                fx = x
+                fy = y
+                fyaw = yaw
+                render_frame = frame_id or "sensor"
+
+            marker = self._project_detection_marker(camera_info, x, y, z, size_x, size_y)
+            detections_payload.append(
+                {
+                    "id": str(getattr(detection, "id", "") or f"d{idx}"),
+                    "class_id": class_id,
+                    "score": round(score, 4),
+                    "distance_m": round(math.sqrt(x * x + y * y + z * z), 3),
+                    "position": {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)},
+                    "size": {"x": round(size_x, 4), "y": round(size_y, 4), "z": round(size_z, 4)},
+                    "yaw": round(yaw, 4),
+                    # BEV rendering ignores z / pitch / roll by design.
+                    "bev": {
+                        "x": round(fx, 4),
+                        "y": round(fy, 4),
+                        "yaw": round(fyaw, 4),
+                        "length": round(size_x, 4),
+                        "width": round(size_y, 4),
+                    },
+                    "render_frame": render_frame,
+                    "camera_marker": marker,
+                }
+            )
+
+        return {
+            "stamp_unix": time.time(),
+            "topic": self._detection_topic,
+            "frame_id": frame_id,
+            "fixed_frame": fixed_frame,
+            "resolved_in_fixed": resolved_in_fixed,
+            "warnings": warnings,
+            "detection_count": len(detections_payload),
+            "detections": detections_payload,
+        }
+
+    @staticmethod
+    def _stamp_to_unix(stamp_msg: Any) -> float:
+        sec = float(getattr(stamp_msg, "sec", 0.0))
+        nsec = float(getattr(stamp_msg, "nanosec", 0.0))
+        value = sec + (nsec / 1e9)
+        if value <= 0.0:
+            return time.time()
+        return value
+
+    def _on_odom(self, msg: Odometry) -> None:
         self._mark_topic("odom")
+        pose = msg.pose.pose
+        yaw = self._quat_to_yaw(
+            float(pose.orientation.x),
+            float(pose.orientation.y),
+            float(pose.orientation.z),
+            float(pose.orientation.w),
+        )
+        payload = {
+            "x": float(pose.position.x),
+            "y": float(pose.position.y),
+            "yaw": yaw,
+            "frame_id": (msg.header.frame_id or "odom").strip("/") or "odom",
+            "child_frame_id": (msg.child_frame_id or self._base_frame).strip("/") or self._base_frame,
+            "stamp_unix": self._stamp_to_unix(msg.header.stamp),
+            "twist_linear_x": float(msg.twist.twist.linear.x),
+            "twist_angular_z": float(msg.twist.twist.angular.z),
+        }
+        with self._latest_odom_lock:
+            self._latest_odom_pose = payload
 
     def _on_tf(self, msg: TFMessage) -> None:
         self._mark_topic("tf")
@@ -577,11 +901,125 @@ class RosAdapters:
     def _make_camera_callback(self, topic_name: str) -> Callable[[Image], None]:
         key = f"camera:{topic_name}"
 
-        def _cb(_msg: Image) -> None:
+        def _cb(msg: Image) -> None:
             self._mark_topic("camera")
             self._mark_topic(key)
+            if topic_name == self._depth_topic:
+                self._mark_topic("depth")
+                self._mark_topic(f"depth:{topic_name}")
+                depth_payload = self._build_depth_payload(msg)
+                with self._latest_depth_payload_lock:
+                    self._latest_depth_payload = depth_payload
+            elif topic_name == self._rgb_topic:
+                self._mark_topic("rgb")
+                self._mark_topic(f"rgb:{topic_name}")
+
+            with self._camera_raw_lock:
+                self._camera_raw_state[topic_name] = {
+                    "stamp_unix": self._stamp_to_unix(msg.header.stamp),
+                    "frame_id": msg.header.frame_id,
+                    "encoding": msg.encoding,
+                    "width": int(msg.width),
+                    "height": int(msg.height),
+                    "step": int(msg.step),
+                    "topic": topic_name,
+                }
 
         return _cb
+
+    def _on_camera_info(self, msg: CameraInfo) -> None:
+        self._mark_topic("camera_info")
+        if len(msg.k) < 9:
+            return
+        with self._latest_camera_info_lock:
+            self._latest_camera_info = {
+                "frame_id": msg.header.frame_id,
+                "stamp_unix": self._stamp_to_unix(msg.header.stamp),
+                "width": int(msg.width),
+                "height": int(msg.height),
+                "fx": float(msg.k[0]),
+                "fy": float(msg.k[4]),
+                "cx": float(msg.k[2]),
+                "cy": float(msg.k[5]),
+            }
+
+    def _build_depth_payload(self, msg: Image) -> Dict[str, Any]:
+        width = int(msg.width)
+        height = int(msg.height)
+        step = int(msg.step)
+        data = bytes(msg.data)
+        if width <= 0 or height <= 0 or step <= 0 or len(data) < 2:
+            return {
+                "stamp_unix": time.time(),
+                "topic": self._depth_topic,
+                "frame_id": msg.header.frame_id,
+                "encoding": msg.encoding,
+                "width": width,
+                "height": height,
+                "rows": 0,
+                "cols": 0,
+                "min_mm": None,
+                "max_mm": None,
+                "data": [],
+            }
+
+        step_x = max(1, width // 96)
+        step_y = max(1, height // 64)
+        byteorder = "big" if bool(msg.is_bigendian) else "little"
+        sampled_mm: List[int] = []
+        min_mm: Optional[int] = None
+        max_mm: Optional[int] = None
+
+        for y in range(0, height, step_y):
+            row_base = y * step
+            for x in range(0, width, step_x):
+                offset = row_base + x * 2
+                if offset + 2 > len(data):
+                    sampled_mm.append(0)
+                    continue
+                raw = int.from_bytes(data[offset : offset + 2], byteorder=byteorder, signed=False)
+                sampled_mm.append(raw)
+                if raw <= 0:
+                    continue
+                if min_mm is None or raw < min_mm:
+                    min_mm = raw
+                if max_mm is None or raw > max_mm:
+                    max_mm = raw
+
+        if min_mm is None or max_mm is None or max_mm <= min_mm:
+            normalized = [0 for _ in sampled_mm]
+        else:
+            span = float(max_mm - min_mm)
+            normalized = [
+                0
+                if value <= 0
+                else int(max(0.0, min(255.0, ((value - min_mm) / span) * 255.0)))
+                for value in sampled_mm
+            ]
+
+        return {
+            "stamp_unix": time.time(),
+            "topic": self._depth_topic,
+            "frame_id": msg.header.frame_id,
+            "encoding": msg.encoding,
+            "width": width,
+            "height": height,
+            "rows": max(1, (height + step_y - 1) // step_y),
+            "cols": max(1, (width + step_x - 1) // step_x),
+            "step_x": step_x,
+            "step_y": step_y,
+            "min_mm": min_mm,
+            "max_mm": max_mm,
+            "data": normalized,
+        }
+
+    def _on_detections(self, msg: Any) -> None:
+        self._mark_topic("detections")
+        if self._detection_topic:
+            self._mark_topic(f"detections:{self._detection_topic}")
+        payload = self._build_detection_payload(msg)
+        with self._latest_detection_payload_lock:
+            self._latest_detection_payload = payload
 
     def _make_camera_stream_callback(self, topic_name: str) -> Callable[[CompressedImage], None]:
         key = f"camera_stream:{topic_name}"
@@ -630,10 +1068,7 @@ class RosAdapters:
 
                 trans = transform.transform.translation
                 rot = transform.transform.rotation
-                stamp_msg = transform.header.stamp
-                stamp_unix = float(stamp_msg.sec) + float(getattr(stamp_msg, "nanosec", 0)) / 1e9
-                if stamp_unix <= 0.0:
-                    stamp_unix = time.time()
+                stamp_unix = self._stamp_to_unix(transform.header.stamp)
 
                 edge = {
                     "x": float(trans.x),
@@ -679,15 +1114,128 @@ class RosAdapters:
 
         return None
 
-    def _scan_points_in_map(
+    def available_frames(self) -> List[str]:
+        with self._lock:
+            known = set(self._tf_frames)
+        map_payload = self.latest_map_snapshot() or {}
+        map_frame = str(map_payload.get("frame_id", self._map_frame)).strip("/")
+        if map_frame:
+            known.add(map_frame)
+
+        scan_payload = self.latest_scan_snapshot() or {}
+        scan_frame = str(scan_payload.get("frame_id", "")).strip("/")
+        if scan_frame:
+            known.add(scan_frame)
+
+        det_payload = self.latest_detection_snapshot() or {}
+        det_frame = str(det_payload.get("frame_id", "")).strip("/")
+        if det_frame:
+            known.add(det_frame)
+
+        odom = self._latest_odom_snapshot() or {}
+        odom_frame = str(odom.get("frame_id", "")).strip("/")
+        child_frame = str(odom.get("child_frame_id", "")).strip("/")
+        if odom_frame:
+            known.add(odom_frame)
+        if child_frame:
+            known.add(child_frame)
+
+        return sorted([frame for frame in known if frame])
+
+    def set_fixed_frame(self, frame_name: str) -> Dict[str, Any]:
+        name = (frame_name or "").strip().strip("/")
+        if name and name not in self._fixed_frame_candidates:
+            return {"ok": False, "error": "unsupported_fixed_frame"}
+        self._selected_fixed_frame = name
+        return {"ok": True, "selected_fixed_frame": self._selected_fixed_frame or "auto"}
+
+    def fixed_frame_state(self) -> Dict[str, Any]:
+        resolved, warnings = self._resolve_fixed_frame()
+        selected = self._selected_fixed_frame or "auto"
+        return {
+            "selected": selected,
+            "resolved": resolved,
+            "available": self.available_frames(),
+            "options": list(self._fixed_frame_candidates),
+            "warnings": warnings,
+        }
+
+    def tf_health_status(self) -> Dict[str, Any]:
+        fixed = self.fixed_frame_state()
+        fixed_frame = str(fixed.get("resolved", ""))
+        scan = self.latest_scan_snapshot() or {}
+        scan_frame = str(scan.get("frame_id", "")).strip("/")
+        scan_ok = bool(scan_frame and (scan_frame == fixed_frame or self.lookup_transform(fixed_frame, scan_frame)))
+        det = self.latest_detection_snapshot() or {}
+        det_frame = str(det.get("frame_id", "")).strip("/")
+        det_ok = bool(det_frame and (det_frame == fixed_frame or self.lookup_transform(fixed_frame, det_frame)))
+
+        missing_pairs: List[str] = []
+        if scan_frame and not scan_ok:
+            missing_pairs.append(f"{scan_frame}->{fixed_frame}")
+        if det_frame and not det_ok:
+            missing_pairs.append(f"{det_frame}->{fixed_frame}")
+
+        has_base_link = self._base_frame in set(self.available_frames())
+        has_odom_base = self.lookup_transform("odom", self._base_frame) is not None
+        has_base_laser = bool(scan_frame and self.lookup_transform(self._base_frame, scan_frame))
+        has_base_oak = self.lookup_transform(self._base_frame, "oak-d-base-frame") is not None
+        has_base_oak = has_base_oak or self.lookup_transform(
+            self._base_frame, "oak_rgb_camera_optical_frame"
+        ) is not None
+
+        return {
+            "tf_age_sec": self.topic_age_sec("tf"),
+            "tf_static_age_sec": self.topic_age_sec("tf_static"),
+            "fixed_frame": fixed,
+            "scan_to_fixed_ok": scan_ok,
+            "detections_to_fixed_ok": det_ok,
+            "missing_pairs": missing_pairs,
+            "has_base_link": has_base_link,
+            "has_odom_base_tf": has_odom_base,
+            "has_base_laser_tf": has_base_laser,
+            "has_base_oak_tf": has_base_oak,
+        }
+
+    def _resolve_fixed_frame(self) -> tuple[str, List[str]]:
+        warnings: List[str] = []
+        available = set(self.available_frames())
+        selected = self._selected_fixed_frame.strip("/") if self._selected_fixed_frame else ""
+        if selected:
+            if selected in available:
+                return selected, warnings
+            warnings.append(f"Requested fixed frame '{selected}' unavailable")
+
+        for frame in self._fixed_frame_candidates:
+            if frame in available:
+                return frame, warnings
+
+        fallback = self._base_frame if self._base_frame in available else "base_link"
+        warnings.append(f"No preferred fixed frame available; falling back to {fallback}")
+        return fallback, warnings
+
+    def _transform_xy_points(
         self,
-        scan_frame: str,
         points: Sequence[Sequence[float]],
+        target_frame: str,
+        source_frame: str,
         max_points: int = 500,
-    ) -> List[List[float]]:
-        tf = self.lookup_transform(self._map_frame, scan_frame)
+    ) -> tuple[List[List[float]], bool]:
+        source_frame = (source_frame or "").strip("/")
+        target_frame = (target_frame or "").strip("/")
+        if not source_frame or not target_frame:
+            return [], False
+
+        if target_frame == source_frame:
+            return [
+                [round(float(point[0]), 4), round(float(point[1]), 4)]
+                for point in points[:max_points]
+                if len(point) >= 2
+            ], True
+
+        tf = self.lookup_transform(target_frame, source_frame)
         if tf is None:
-            return []
+            return [], False
 
         step = max(1, len(points) // max(1, max_points))
         yaw = float(tf.get("yaw", 0.0))
@@ -696,7 +1244,7 @@ class RosAdapters:
         tx = float(tf.get("x", 0.0))
         ty = float(tf.get("y", 0.0))
 
-        mapped: List[List[float]] = []
+        transformed: List[List[float]] = []
         for idx, point in enumerate(points):
             if idx % step != 0:
                 continue
@@ -706,30 +1254,86 @@ class RosAdapters:
             sy = float(point[1])
             mx = tx + cos_yaw * sx - sin_yaw * sy
             my = ty + sin_yaw * sx + cos_yaw * sy
-            mapped.append([round(mx, 4), round(my, 4)])
-            if len(mapped) >= max_points:
+            transformed.append([round(mx, 4), round(my, 4)])
+            if len(transformed) >= max_points:
                 break
-        return mapped
+        return transformed, True
+
+    def _scan_points_in_frame(
+        self,
+        target_frame: str,
+        scan_frame: str,
+        points: Sequence[Sequence[float]],
+        max_points: int = 500,
+    ) -> tuple[List[List[float]], bool]:
+        return self._transform_xy_points(points, target_frame, scan_frame, max_points=max_points)
+
+    def _latest_odom_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._latest_odom_lock:
+            if self._latest_odom_pose is None:
+                return None
+            return dict(self._latest_odom_pose)
+
+    def robot_pose_in_frame(self, frame_name: str) -> Optional[Dict[str, float]]:
+        frame_name = (frame_name or "").strip("/")
+        if not frame_name:
+            return None
+
+        tf = self.lookup_transform(frame_name, self._base_frame)
+        if tf is not None:
+            return {
+                "x": round(float(tf.get("x", 0.0)), 4),
+                "y": round(float(tf.get("y", 0.0)), 4),
+                "yaw": round(float(tf.get("yaw", 0.0)), 4),
+                "stamp_unix": float(tf.get("stamp_unix", time.time())),
+                "frame_id": frame_name,
+                "base_frame": self._base_frame,
+                "source": "tf",
+            }
+
+        odom = self._latest_odom_snapshot()
+        if odom and str(odom.get("frame_id", "")) == frame_name:
+            return {
+                "x": round(float(odom.get("x", 0.0)), 4),
+                "y": round(float(odom.get("y", 0.0)), 4),
+                "yaw": round(float(odom.get("yaw", 0.0)), 4),
+                "stamp_unix": float(odom.get("stamp_unix", time.time())),
+                "frame_id": frame_name,
+                "base_frame": str(odom.get("child_frame_id", self._base_frame)),
+                "source": "odom",
+            }
+        return None
 
     def robot_pose_in_map(self) -> Optional[Dict[str, float]]:
-        tf = self.lookup_transform(self._map_frame, self._base_frame)
-        if tf is None:
-            return None
-        return {
-            "x": round(float(tf.get("x", 0.0)), 4),
-            "y": round(float(tf.get("y", 0.0)), 4),
-            "yaw": round(float(tf.get("yaw", 0.0)), 4),
-            "stamp_unix": float(tf.get("stamp_unix", time.time())),
-            "frame_id": self._map_frame,
-            "base_frame": self._base_frame,
-        }
+        return self.robot_pose_in_frame(self._map_frame)
 
     def topic_rates(self) -> Dict[str, float]:
-        keys = ["scan", "odom", "camera", "camera_stream", "tf", "tf_static", "map", "path", "pointcloud"]
+        keys = [
+            "scan",
+            "odom",
+            "camera",
+            "rgb",
+            "depth",
+            "camera_info",
+            "detections",
+            "camera_stream",
+            "tf",
+            "tf_static",
+            "map",
+            "path",
+            "pointcloud",
+        ]
         rates = {key: self._rate[key].hz() for key in keys}
         for topic in self._camera_topics:
             key = f"camera:{topic}"
             rates[key] = self._rate[key].hz()
+            rates[f"rgb:{topic}"] = self._rate[f"rgb:{topic}"].hz()
+            rates[f"depth:{topic}"] = self._rate[f"depth:{topic}"].hz()
+
+        if self._detection_topic:
+            rates[f"detections:{self._detection_topic}"] = self._rate[
+                f"detections:{self._detection_topic}"
+            ].hz()
 
         for topic in self.camera_stream_topics():
             key = f"camera_stream:{topic}"
@@ -961,7 +1565,11 @@ class RosAdapters:
             self.ensure_path_subscription(topic)
 
         combined = list(self._path_subs.keys()) + self._path_topics + discovered
-        return sorted(self._unique_topics(combined))
+        topics = sorted(self._unique_topics(combined))
+        active = [topic for topic in topics if self._publisher_count(topic) > 0]
+        if active and (not self._selected_path_topic or self._publisher_count(self._selected_path_topic) == 0):
+            self._selected_path_topic = active[0]
+        return topics
 
     def selected_path_payload(self) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -992,6 +1600,7 @@ class RosAdapters:
         map_topics = self._discover_topics("nav_msgs/msg/OccupancyGrid")
         scan_topics = self._discover_topics("sensor_msgs/msg/LaserScan")
         path_topics = self.path_topics()
+        fixed_state = self.fixed_frame_state()
         return {
             "selected": {
                 "map_topic": self._map_topic,
@@ -999,11 +1608,14 @@ class RosAdapters:
                 "path_topic": self._selected_path_topic,
                 "map_frame": self._map_frame,
                 "base_frame": self._base_frame,
+                "fixed_frame": fixed_state.get("selected"),
+                "resolved_fixed_frame": fixed_state.get("resolved"),
             },
             "available": {
                 "map_topics": map_topics,
                 "scan_topics": scan_topics,
                 "path_topics": path_topics,
+                "fixed_frames": fixed_state.get("options", []),
             },
         }
 
@@ -1032,6 +1644,13 @@ class RosAdapters:
             self._base_frame = base_frame
             changed["base_frame"] = base_frame
 
+        fixed_frame = str(payload.get("fixed_frame", "")).strip().strip("/")
+        if fixed_frame or "fixed_frame" in payload:
+            result = self.set_fixed_frame(fixed_frame)
+            if not result.get("ok", False):
+                return result
+            changed["fixed_frame"] = result.get("selected_fixed_frame")
+
         return {
             "ok": True,
             "changed": changed,
@@ -1041,19 +1660,99 @@ class RosAdapters:
 
     def map_overlay_snapshot(self) -> Dict[str, Any]:
         scan = self.latest_scan_snapshot() or {}
-        pose = self.robot_pose_in_map()
+        fixed_frame, frame_warnings = self._resolve_fixed_frame()
+        pose = self.robot_pose_in_frame(fixed_frame)
+        if pose is None:
+            pose = {
+                "x": 0.0,
+                "y": 0.0,
+                "yaw": 0.0,
+                "stamp_unix": time.time(),
+                "frame_id": fixed_frame,
+                "base_frame": self._base_frame,
+                "source": "origin",
+            }
         path = self.selected_path_payload()
+        warnings = list(frame_warnings)
+        scan_points_sensor = list(scan.get("points", []))
+        scan_frame = str(scan.get("frame_id", "")).strip("/")
+        scan_points_fixed, scan_resolved = self._scan_points_in_frame(
+            fixed_frame,
+            scan_frame,
+            scan_points_sensor,
+            max_points=self._scan_overlay_points,
+        )
+        if scan_points_sensor and not scan_resolved:
+            warnings.append(f"Missing TF: cannot transform {scan_frame or 'scan'} to {fixed_frame}")
+
+        path_points: List[List[float]] = []
+        path_frame = ""
+        path_resolved = False
+        if path:
+            path_frame = str(path.get("frame_id", "")).strip("/")
+            path_points, path_resolved = self._transform_xy_points(
+                path.get("points", []),
+                fixed_frame,
+                path_frame,
+                max_points=1200,
+            )
+            if not path_points and path.get("points") and not path_resolved:
+                warnings.append(f"Missing TF: cannot transform {path_frame or 'path'} to {fixed_frame}")
+
+        detections = self.latest_detection_snapshot() or {}
+        detection_items = detections.get("detections", []) if isinstance(detections, dict) else []
+        detection_bev = [
+            {
+                "id": item.get("id", ""),
+                "class_id": item.get("class_id", ""),
+                "score": item.get("score", 0.0),
+                "distance_m": item.get("distance_m"),
+                "bev": item.get("bev", {}),
+                "camera_marker": item.get("camera_marker"),
+            }
+            for item in detection_items
+            if isinstance(item, dict)
+        ]
+        if isinstance(detections, dict):
+            for warning in detections.get("warnings", []) or []:
+                if warning not in warnings:
+                    warnings.append(str(warning))
+
+        active_path_topics = [topic for topic in self.path_topics() if self._publisher_count(topic) > 0]
         return {
             "stamp_unix": time.time(),
             "map_frame": self._map_frame,
+            "fixed_frame": fixed_frame,
+            "selected_fixed_frame": self._selected_fixed_frame or "auto",
+            "fixed_frame_warnings": frame_warnings,
             "scan_topic": self._scan_topic,
-            "scan_points": scan.get("points_map", []),
-            "scan_point_count": scan.get("point_count_map", 0),
+            "scan_frame": scan_frame,
+            "scan_points": scan_points_fixed,
+            "scan_points_sensor": scan_points_sensor,
+            "scan_point_count": len(scan_points_fixed),
+            "scan_sensor_point_count": len(scan_points_sensor),
+            "scan_resolved": scan_resolved,
             "scan_age_sec": self.topic_age_sec("scan"),
             "robot_pose": pose,
             "path_topic": path.get("topic") if path else self._selected_path_topic,
-            "path_points": path.get("points", []) if path else [],
-            "path_point_count": path.get("point_count", 0) if path else 0,
+            "path_frame": path_frame,
+            "path_points": path_points,
+            "path_point_count": len(path_points),
+            "path_resolved": path_resolved,
+            "planner_active": len(active_path_topics) > 0,
+            "active_plan_topics": active_path_topics,
+            "detection_topic": detections.get("topic", self._detection_topic)
+            if isinstance(detections, dict)
+            else self._detection_topic,
+            "detection_frame": detections.get("frame_id", "")
+            if isinstance(detections, dict)
+            else "",
+            "detection_count": len(detection_bev),
+            "detection_resolved": bool(detections.get("resolved_in_fixed", False))
+            if isinstance(detections, dict)
+            else False,
+            "detections": detection_bev,
+            "warnings": warnings,
             "tf_age_sec": self.topic_age_sec("tf"),
         }
 
@@ -1061,9 +1760,11 @@ class RosAdapters:
         rates = self.topic_rates()
         age = self.topic_age_sec("map")
         payload = self.latest_map_snapshot()
-        pose = self.robot_pose_in_map()
+        fixed = self.fixed_frame_state()
+        pose = self.robot_pose_in_frame(str(fixed.get("resolved", self._map_frame)))
         available_map_topics = self._discover_topics("nav_msgs/msg/OccupancyGrid")
         available_path_topics = self.path_topics()
+        active_path_topics = [topic for topic in available_path_topics if self._publisher_count(topic) > 0]
         return {
             "topic": self._map_topic,
             "fps": rates.get("map", 0.0),
@@ -1080,6 +1781,9 @@ class RosAdapters:
             "selected_path_topic": self._selected_path_topic,
             "available_map_topics": available_map_topics,
             "available_path_topics": available_path_topics,
+            "active_plan_topics": active_path_topics,
+            "planner_active": len(active_path_topics) > 0,
+            "fixed_frame": fixed,
             "path_rate_hz": rates.get(f"path:{self._selected_path_topic}", 0.0)
             if self._selected_path_topic
             else 0.0,
@@ -1100,6 +1804,13 @@ class RosAdapters:
             "fps": rates.get("scan", 0.0),
             "age_sec": scan_age,
             "point_count": (payload or {}).get("point_count", 0),
+            "sample_count": (payload or {}).get("sample_count", 0),
+            "frame_id": (payload or {}).get("frame_id"),
+            "range_min": (payload or {}).get("range_min"),
+            "range_max": (payload or {}).get("range_max"),
+            "angle_min": (payload or {}).get("angle_min"),
+            "angle_max": (payload or {}).get("angle_max"),
+            "publisher_count": self._publisher_count(self._scan_topic),
             "connected": scan_age is not None and scan_age < 2.0,
         }
 
@@ -1131,8 +1842,235 @@ class RosAdapters:
             "fps": rates.get(topic_key, rates.get("pointcloud", 0.0)),
             "age_sec": age,
             "connected": age is not None and age < 2.5,
+            "publisher_count": self._publisher_count(selected) if selected else 0,
             "frame_id": (payload or {}).get("frame_id"),
             "point_count": (payload or {}).get("point_count", 0),
+        }
+
+    def latest_depth_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._latest_depth_payload_lock:
+            if self._latest_depth_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_depth_payload))
+
+    def latest_detection_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._latest_detection_payload_lock:
+            if self._latest_detection_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_detection_payload))
+
+    def rgb_raw_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        with self._camera_raw_lock:
+            sample = dict(self._camera_raw_state.get(self._rgb_topic, {}))
+        age = None
+        if sample.get("stamp_unix"):
+            age = max(0.0, time.time() - float(sample["stamp_unix"]))
+        return {
+            "topic": self._rgb_topic,
+            "fps": rates.get(f"rgb:{self._rgb_topic}", rates.get(f"camera:{self._rgb_topic}", 0.0)),
+            "age_sec": age,
+            "connected": age is not None and age < 2.5,
+            "publisher_count": self._publisher_count(self._rgb_topic),
+            "frame_id": sample.get("frame_id"),
+            "encoding": sample.get("encoding"),
+            "width": sample.get("width"),
+            "height": sample.get("height"),
+            "camera_info_topic": self._camera_info_topic,
+            "camera_info_age_sec": self.topic_age_sec("camera_info"),
+        }
+
+    def depth_stream_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        payload = self.latest_depth_snapshot()
+        age = self.topic_age_sec("depth")
+        return {
+            "topic": self._depth_topic,
+            "fps": rates.get(f"depth:{self._depth_topic}", rates.get("depth", 0.0)),
+            "age_sec": age,
+            "connected": age is not None and age < 2.5,
+            "publisher_count": self._publisher_count(self._depth_topic),
+            "frame_id": (payload or {}).get("frame_id"),
+            "encoding": (payload or {}).get("encoding"),
+            "width": (payload or {}).get("width"),
+            "height": (payload or {}).get("height"),
+            "min_mm": (payload or {}).get("min_mm"),
+            "max_mm": (payload or {}).get("max_mm"),
+            "rows": (payload or {}).get("rows", 0),
+            "cols": (payload or {}).get("cols", 0),
+        }
+
+    def detection_topics(self) -> List[str]:
+        if Detection3DArray is None:
+            return [self._detection_topic] if self._detection_topic else []
+        discovered = self._discover_topics("vision_msgs/msg/Detection3DArray")
+        combined = self._unique_topics(discovered + [self._detection_topic])
+        return sorted([topic for topic in combined if topic])
+
+    def detection_stream_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        payload = self.latest_detection_snapshot()
+        age = self.topic_age_sec("detections")
+        topic_key = f"detections:{self._detection_topic}" if self._detection_topic else "detections"
+        return {
+            "topic": self._detection_topic,
+            "available_topics": self.detection_topics(),
+            "fps": rates.get(topic_key, rates.get("detections", 0.0)),
+            "age_sec": age,
+            "connected": age is not None and age < 2.0,
+            "publisher_count": self._publisher_count(self._detection_topic),
+            "frame_id": (payload or {}).get("frame_id"),
+            "detection_count": (payload or {}).get("detection_count", 0),
+            "resolved_in_fixed": (payload or {}).get("resolved_in_fixed", False),
+            "warnings": (payload or {}).get("warnings", []),
+            "vision_msgs_available": Detection3DArray is not None,
+        }
+
+    def topic_catalog(self) -> Dict[str, Any]:
+        return {
+            "scan": {
+                "selected_topic": self._scan_topic,
+                "options": self._topic_options(
+                    "sensor_msgs/msg/LaserScan",
+                    selected=self._scan_topic,
+                    defaults=["/scan"],
+                ),
+            },
+            "rgb": {
+                "selected_topic": self._rgb_topic,
+                "options": self._topic_options(
+                    "sensor_msgs/msg/Image",
+                    selected=self._rgb_topic,
+                    defaults=["/oak/rgb/image_raw"],
+                ),
+            },
+            "depth": {
+                "selected_topic": self._depth_topic,
+                "options": self._topic_options(
+                    "sensor_msgs/msg/Image",
+                    selected=self._depth_topic,
+                    defaults=["/oak/stereo/image_raw"],
+                ),
+            },
+            "detections": {
+                "selected_topic": self._detection_topic,
+                "options": [
+                    {
+                        "topic": topic,
+                        "publisher_count": self._publisher_count(topic),
+                    }
+                    for topic in self.detection_topics()
+                ],
+            },
+            "map": {
+                "selected_topic": self._map_topic,
+                "options": self._topic_options(
+                    "nav_msgs/msg/OccupancyGrid",
+                    selected=self._map_topic,
+                    defaults=["/map"],
+                ),
+            },
+            "pointcloud": {
+                "selected_topic": self._pointcloud_topic,
+                "options": self._topic_options(
+                    "sensor_msgs/msg/PointCloud2",
+                    selected=self._pointcloud_topic,
+                    defaults=["/cloud_map"],
+                ),
+            },
+            "plans": {
+                "selected_topic": self._selected_path_topic,
+                "options": [
+                    {
+                        "topic": topic,
+                        "publisher_count": self._publisher_count(topic),
+                    }
+                    for topic in self.path_topics()
+                ],
+            },
+            "fixed_frame": self.fixed_frame_state(),
+        }
+
+    def configure_visualizer(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        changed: Dict[str, Any] = {}
+
+        scan_topic = str(payload.get("scan_topic", "")).strip()
+        if scan_topic and scan_topic != self._scan_topic:
+            result = self.ensure_scan_subscription(scan_topic)
+            if not result.get("ok", False):
+                return result
+            changed["scan_topic"] = scan_topic
+
+        rgb_topic = str(payload.get("rgb_topic", "")).strip()
+        if rgb_topic and rgb_topic != self._rgb_topic:
+            self.ensure_camera_raw_subscription(rgb_topic)
+            self._rgb_topic = rgb_topic
+            changed["rgb_topic"] = rgb_topic
+            guessed_info = self._derive_camera_info_topic(rgb_topic)
+            if guessed_info:
+                self._set_camera_info_subscription(guessed_info)
+                changed["camera_info_topic"] = guessed_info
+            derived_compressed = self._derived_compressed_topics([rgb_topic])
+            if derived_compressed:
+                self.ensure_camera_stream_subscription(derived_compressed[0])
+                self._camera_stream_topic = derived_compressed[0]
+                changed["camera_stream_topic"] = derived_compressed[0]
+
+        depth_topic = str(payload.get("depth_topic", "")).strip()
+        if depth_topic and depth_topic != self._depth_topic:
+            self.ensure_camera_raw_subscription(depth_topic)
+            self._depth_topic = depth_topic
+            changed["depth_topic"] = depth_topic
+
+        detection_topic = str(payload.get("detection_topic", "")).strip()
+        if detection_topic and detection_topic != self._detection_topic:
+            result = self.ensure_detection_subscription(detection_topic)
+            if not result.get("ok", False):
+                return result
+            changed["detection_topic"] = detection_topic
+
+        camera_stream_topic = str(payload.get("camera_stream_topic", "")).strip()
+        if camera_stream_topic and camera_stream_topic != self._camera_stream_topic:
+            self.ensure_camera_stream_subscription(camera_stream_topic)
+            self._camera_stream_topic = camera_stream_topic
+            changed["camera_stream_topic"] = camera_stream_topic
+
+        camera_info_topic = str(payload.get("camera_info_topic", "")).strip()
+        if camera_info_topic and camera_info_topic != self._camera_info_topic:
+            self._set_camera_info_subscription(camera_info_topic)
+            changed["camera_info_topic"] = camera_info_topic
+
+        pointcloud_topic = str(payload.get("pointcloud_topic", "")).strip()
+        if pointcloud_topic and pointcloud_topic != self._pointcloud_topic:
+            result = self.ensure_pointcloud_subscription(pointcloud_topic)
+            if not result.get("ok", False):
+                return result
+            changed["pointcloud_topic"] = pointcloud_topic
+
+        map_topic = str(payload.get("map_topic", "")).strip()
+        if map_topic and map_topic != self._map_topic:
+            self._set_map_subscription(map_topic)
+            changed["map_topic"] = map_topic
+
+        path_topic = str(payload.get("path_topic", "")).strip()
+        if path_topic and path_topic != self._selected_path_topic:
+            result = self.select_path_topic(path_topic)
+            if not result.get("ok", False):
+                return result
+            changed["path_topic"] = path_topic
+
+        fixed_frame = str(payload.get("fixed_frame", "")).strip().strip("/")
+        if fixed_frame or "fixed_frame" in payload:
+            result = self.set_fixed_frame(fixed_frame)
+            if not result.get("ok", False):
+                return result
+            changed["fixed_frame"] = result.get("selected_fixed_frame")
+
+        return {
+            "ok": True,
+            "changed": changed,
+            "topic_catalog": self.topic_catalog(),
+            "map_status": self.map_stream_status(),
         }
 
     def camera_stream_topics(self) -> List[str]:
@@ -1260,6 +2198,8 @@ class RosAdapters:
             "selected_topic": topic,
             "available_topics": available_topics,
             "topic_metrics": topic_metrics,
+            "publisher_count": self._publisher_count(topic) if topic else 0,
+            "selected_rgb_topic": self._rgb_topic,
             "fps": selected_metric.get("fps", 0.0),
             "age_sec": selected_metric.get("age_sec"),
             "connected": selected_metric.get("connected", False),
@@ -1295,6 +2235,7 @@ class RosAdapters:
 
         return {
             "nav_msgs_available": nav_msgs_available,
+            "vision_msgs_available": Detection3DArray is not None,
             "nav_server_ready": nav_server_ready,
             "nav_goal": nav_msgs_available and nav_server_ready,
             "nav_cancel": nav_cancel,

@@ -18,8 +18,16 @@ ls -l /dev/ttyRPLIDAR /dev/ttyROARM
 Verify logs and process health:
 ```bash
 ls -lah ../../jetson/logs
-ps -ef | grep -E 'run_stack.sh|runtime_stub.py|bb_bridge_stub.py|ros2' | grep -v grep
+ps -ef | grep -E 'run_stack.sh|runtime_stub.py|base_bringup|robot_console|ros2' | grep -v grep
 ```
+
+Verify odom/TF bridge:
+```bash
+ros2 topic hz /odom
+ros2 topic hz /tf
+ros2 run tf2_ros tf2_echo odom base_link
+```
+Expected: continuous `/odom` + `/tf`, with `odom->base_link` changing while robot moves.
 
 ### 2) BeagleBone
 Install deps (creates/updates host daemon venv):
