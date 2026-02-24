@@ -52,14 +52,20 @@ npm run build:web
 
 Built-in visualizer:
 
-- Waymo-style 2D map view:
-  - live `/map` occupancy grid
-  - `/scan` overlay in map frame
-  - robot pose arrow from TF (`map -> odom -> base_link`)
-  - optional nav path overlay (configurable path topic)
-- Live 3D point-cloud view from `sensor_msgs/PointCloud2` (topic-selectable)
-- Live camera MJPEG stream from `/stream/camera.mjpeg`
-- FPS/age/connected indicators
+- Top diagnostics bar:
+  - TF health (`/tf` age, missing transform pairs, base_link/odom warnings)
+  - live rates and message ages for scan/rgb/depth/detections
+- 3-panel Waymo-style layout:
+  - **Fused View**: occupancy grid, lidar scan, plan, detection boxes
+  - **Top-Down Minimap**: always-on compact BEV with layer legend/toggles
+  - **OAK-D RGB + Overlays**: RGB stream with detection overlay and optional depth blend
+- Raw Feeds (Debug):
+  - OAK RGB raw stream + topic/encoding/frame/rate/age
+  - LiDAR raw XY plot + angle/range/sample stats
+- Fallback behavior:
+  - if TF is incomplete, rendering stays active in sensor-centric mode
+  - warnings are shown instead of blank panels
+  - temporary manual extrinsics (laser -> oak-d-base-frame) are available for debug and auto-disabled once TF path exists
 
 Foxglove (recommended full view):
 
@@ -73,6 +79,45 @@ ssh -N -L 8765:127.0.0.1:8765 jetson@<jetson-ip>
 ```
 
 Then connect to `ws://localhost:8765`.
+
+## TF Checklist For Accurate Visualization
+
+The visualizer can run with partial TF, but accurate moving-map alignment requires:
+
+- Dynamic transform: `odom -> base_link` (continuous, 30-100 Hz target)
+- Static transform: `base_link -> laser`
+- Static transform: `base_link -> oak-d-base-frame`
+- Optional future localization: `map -> odom` from SLAM/localization
+
+### New bringup package
+
+`base_bringup` now provides:
+
+- `bbb_odom_tf_bridge` node:
+  - polls BBB `/api/status`
+  - publishes `/odom` with `frame_id=odom`, `child_frame_id=base_link`
+  - publishes TF `odom->base_link`
+  - stale telemetry contract: if BBB telemetry age exceeds timeout, pose integration pauses and zero twist is published
+- `base_tf.launch.py`:
+  - starts `bbb_odom_tf_bridge`
+  - publishes static TFs from YAML (`base_link->laser`, `base_link->oak-d-base-frame`)
+
+Config file: `ros_ws/src/base_bringup/config/base_bringup.yaml`
+
+### Verification commands
+
+```bash
+ros2 topic hz /tf
+ros2 run tf2_ros tf2_echo odom base_link
+ros2 run tf2_ros tf2_echo base_link laser
+ros2 run tf2_ros tf2_echo base_link oak-d-base-frame
+```
+
+Expected:
+
+- `/tf` is continuous while driving
+- `odom->base_link` translation/yaw changes while driving
+- static transforms resolve immediately
 
 ## Logs UI
 

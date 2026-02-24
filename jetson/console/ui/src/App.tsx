@@ -3,6 +3,7 @@ import {
   Badge,
   Button,
   Card,
+  Collapse,
   Col,
   Divider,
   Empty,
@@ -18,6 +19,7 @@ import {
   Slider,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -37,13 +39,17 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MapCanvas } from "./components/MapCanvas";
-import { PointCloudCanvas } from "./components/PointCloudCanvas";
+import { LidarCanvas } from "./components/LidarCanvas";
+import { FusedViewCanvas } from "./components/FusedViewCanvas";
+import { CameraDetectionOverlay } from "./components/CameraDetectionOverlay";
+import { DepthHeatmapCanvas } from "./components/DepthHeatmapCanvas";
 import { getStatus, postApi } from "./lib/api";
 import { agoUnix, bytes, hz, secAge, timestampToLocal } from "./lib/format";
 import { getCachedCameraTopic, getCachedMode, useConsoleStore } from "./store/useConsoleStore";
 import type {
   ArmJointConfig,
+  DepthPayload,
+  DetectionPayload,
   LogSource,
   MapOverlayPayload,
   MapPayload,
@@ -85,6 +91,8 @@ type LogEntry = {
   severity: SeverityFilter;
 };
 
+const VIS_SETTINGS_KEY = "robot_console_hmi.visualizer_settings_v2";
+
 function classifySeverity(line: string): SeverityFilter {
   const lower = line.toLowerCase();
   if (lower.includes("error") || lower.includes("fatal") || lower.includes("traceback")) {
@@ -115,6 +123,8 @@ export default function App(): JSX.Element {
     setMapPayload,
     setMapOverlay,
     setPointcloudPayload,
+    setDepthPayload,
+    setDetectionPayload,
     setSelectedMode,
     setSelectedCameraTopic,
     setModeReconciled,
@@ -130,6 +140,23 @@ export default function App(): JSX.Element {
   const [mapTopicDraft, setMapTopicDraft] = useState("");
   const [pathTopicDraft, setPathTopicDraft] = useState("");
   const [pointcloudDraft, setPointcloudDraft] = useState("");
+  const [scanTopicDraft, setScanTopicDraft] = useState("");
+  const [rgbTopicDraft, setRgbTopicDraft] = useState("");
+  const [depthTopicDraft, setDepthTopicDraft] = useState("");
+  const [detectionTopicDraft, setDetectionTopicDraft] = useState("");
+  const [fixedFrameDraft, setFixedFrameDraft] = useState("auto");
+  const [showDepthBlend, setShowDepthBlend] = useState(false);
+  const [showDetections, setShowDetections] = useState(true);
+  const [rawFeedsOpen, setRawFeedsOpen] = useState<string[]>(["raw"]);
+  const [manualExtrinsicsEnabled, setManualExtrinsicsEnabled] = useState(false);
+  const [manualExtrinsics, setManualExtrinsics] = useState({
+    x: 0,
+    y: 0,
+    z: 0,
+    roll: 0,
+    pitch: 0,
+    yaw: 0,
+  });
   const [driveSpeed, setDriveSpeed] = useState(0.32);
   const [motionDeadlineMs, setMotionDeadlineMs] = useState(0);
   const [deadmanCountdown, setDeadmanCountdown] = useState(0);
@@ -157,17 +184,18 @@ export default function App(): JSX.Element {
   const status = robot.status;
   const capabilities = status?.capabilities || {};
   const logSources: LogSource[] = status?.logs?.sources || [];
-  const cameraTopics = status?.visualizer?.camera?.available_topics || [];
+  const cameraStreamTopics = status?.visualizer?.camera?.available_topics || [];
   const mapTopic = status?.visualizer?.map?.topic || "";
   const pathTopic = status?.visualizer?.map?.selected_path_topic || "";
-  const pointcloudTopics = status?.visualizer?.pointcloud?.available_topics || [];
   const armJoints = (status?.arm?.joints || []) as ArmJointConfig[];
   const namedPoses = status?.arm?.named_poses || [];
 
   const motionActive = motionDeadlineMs > Date.now();
+  const scanPayload = robot.scanPayload;
   const mapPayload = robot.mapPayload;
   const mapOverlay = robot.mapOverlay;
-  const pointcloudPayload = robot.pointcloudPayload;
+  const depthPayload = robot.depthPayload;
+  const detectionPayload = robot.detectionPayload;
 
   const refreshStatus = useCallback(async () => {
     const next = await getStatus();
@@ -214,6 +242,14 @@ export default function App(): JSX.Element {
         }
         if (payload.type === "pointcloud") {
           setPointcloudPayload(payload.data as PointcloudPayload);
+          return;
+        }
+        if (payload.type === "depth") {
+          setDepthPayload(payload.data as DepthPayload);
+          return;
+        }
+        if (payload.type === "detections") {
+          setDetectionPayload(payload.data as DetectionPayload);
         }
       } catch {
         // ignore malformed payloads
@@ -238,6 +274,8 @@ export default function App(): JSX.Element {
     setCameraReconciled,
     setMapOverlay,
     setMapPayload,
+    setDepthPayload,
+    setDetectionPayload,
     setModeReconciled,
     setPointcloudPayload,
     setScanPayload,
@@ -296,6 +334,168 @@ export default function App(): JSX.Element {
       setPointcloudDraft(status.visualizer.pointcloud.selected_topic);
     }
   }, [pointcloudDraft, status?.visualizer?.pointcloud?.selected_topic]);
+
+  useEffect(() => {
+    if (scanTopicDraft || !status?.visualizer?.scan?.topic) {
+      return;
+    }
+    setScanTopicDraft(status.visualizer.scan.topic);
+  }, [scanTopicDraft, status?.visualizer?.scan?.topic]);
+
+  useEffect(() => {
+    if (rgbTopicDraft || !status?.visualizer?.rgb?.topic) {
+      return;
+    }
+    setRgbTopicDraft(status.visualizer.rgb.topic);
+  }, [rgbTopicDraft, status?.visualizer?.rgb?.topic]);
+
+  useEffect(() => {
+    if (depthTopicDraft || !status?.visualizer?.depth?.topic) {
+      return;
+    }
+    setDepthTopicDraft(status.visualizer.depth.topic);
+  }, [depthTopicDraft, status?.visualizer?.depth?.topic]);
+
+  useEffect(() => {
+    if (detectionTopicDraft || !status?.visualizer?.detections?.topic) {
+      return;
+    }
+    setDetectionTopicDraft(status.visualizer.detections.topic);
+  }, [detectionTopicDraft, status?.visualizer?.detections?.topic]);
+
+  useEffect(() => {
+    if (fixedFrameDraft !== "auto") {
+      return;
+    }
+    const selected = status?.visualizer?.tf?.fixed_frame?.selected;
+    if (!selected) {
+      return;
+    }
+    setFixedFrameDraft(selected);
+  }, [fixedFrameDraft, status?.visualizer?.tf?.fixed_frame?.selected]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(VIS_SETTINGS_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        fixedFrame?: string;
+        topics?: {
+          scan?: string;
+          rgb?: string;
+          depth?: string;
+          detections?: string;
+          map?: string;
+          path?: string;
+          pointcloud?: string;
+          camera_stream?: string;
+        };
+        manualExtrinsicsEnabled?: boolean;
+        manualExtrinsics?: {
+          x?: number;
+          y?: number;
+          z?: number;
+          roll?: number;
+          pitch?: number;
+          yaw?: number;
+        };
+      };
+      if (parsed.fixedFrame) {
+        setFixedFrameDraft(parsed.fixedFrame);
+      }
+      if (parsed.topics?.scan) {
+        setScanTopicDraft(parsed.topics.scan);
+      }
+      if (parsed.topics?.rgb) {
+        setRgbTopicDraft(parsed.topics.rgb);
+      }
+      if (parsed.topics?.depth) {
+        setDepthTopicDraft(parsed.topics.depth);
+      }
+      if (parsed.topics?.detections) {
+        setDetectionTopicDraft(parsed.topics.detections);
+      }
+      if (parsed.topics?.map) {
+        setMapTopicDraft(parsed.topics.map);
+      }
+      if (parsed.topics?.path) {
+        setPathTopicDraft(parsed.topics.path);
+      }
+      if (parsed.topics?.pointcloud) {
+        setPointcloudDraft(parsed.topics.pointcloud);
+      }
+      if (parsed.topics?.camera_stream) {
+        setCameraDraft(parsed.topics.camera_stream);
+      }
+      if (typeof parsed.manualExtrinsicsEnabled === "boolean") {
+        setManualExtrinsicsEnabled(parsed.manualExtrinsicsEnabled);
+      }
+      if (parsed.manualExtrinsics) {
+        setManualExtrinsics((prev) => ({
+          x: Number(parsed.manualExtrinsics?.x ?? prev.x),
+          y: Number(parsed.manualExtrinsics?.y ?? prev.y),
+          z: Number(parsed.manualExtrinsics?.z ?? prev.z),
+          roll: Number(parsed.manualExtrinsics?.roll ?? prev.roll),
+          pitch: Number(parsed.manualExtrinsics?.pitch ?? prev.pitch),
+          yaw: Number(parsed.manualExtrinsics?.yaw ?? prev.yaw),
+        }));
+      }
+    } catch {
+      // ignore storage parse issues
+    }
+  }, []);
+
+  useEffect(() => {
+    const payload = {
+      fixedFrame: fixedFrameDraft,
+      topics: {
+        scan: scanTopicDraft,
+        rgb: rgbTopicDraft,
+        depth: depthTopicDraft,
+        detections: detectionTopicDraft,
+        map: mapTopicDraft,
+        path: pathTopicDraft,
+        pointcloud: pointcloudDraft,
+        camera_stream: cameraDraft,
+      },
+      manualExtrinsicsEnabled,
+      manualExtrinsics,
+    };
+    try {
+      window.localStorage.setItem(VIS_SETTINGS_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore storage write issues
+    }
+  }, [
+    cameraDraft,
+    depthTopicDraft,
+    detectionTopicDraft,
+    fixedFrameDraft,
+    manualExtrinsics,
+    manualExtrinsicsEnabled,
+    mapTopicDraft,
+    pathTopicDraft,
+    pointcloudDraft,
+    rgbTopicDraft,
+    scanTopicDraft,
+  ]);
+
+  useEffect(() => {
+    const hasNativePath =
+      status?.visualizer?.tf?.has_base_laser_tf && status?.visualizer?.tf?.has_base_oak_tf;
+    if (!hasNativePath || !manualExtrinsicsEnabled) {
+      return;
+    }
+    setManualExtrinsicsEnabled(false);
+    messageApi.info("Manual extrinsics disabled because TF path base_link->laser/oak is now available.");
+  }, [
+    manualExtrinsicsEnabled,
+    messageApi,
+    status?.visualizer?.tf?.has_base_laser_tf,
+    status?.visualizer?.tf?.has_base_oak_tf,
+  ]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -534,21 +734,31 @@ export default function App(): JSX.Element {
     await refreshStatus();
   }, [cameraDraft, refreshStatus, setSelectedCameraTopic]);
 
-  const applyMapConfig = useCallback(async () => {
-    await postApi("/api/map/config", {
+  const applyVisualizerConfig = useCallback(async () => {
+    await postApi("/api/visualizer/config", {
+      scan_topic: scanTopicDraft || undefined,
+      rgb_topic: rgbTopicDraft || undefined,
+      depth_topic: depthTopicDraft || undefined,
+      detection_topic: detectionTopicDraft || undefined,
       map_topic: mapTopicDraft || undefined,
       path_topic: pathTopicDraft || undefined,
+      pointcloud_topic: pointcloudDraft || undefined,
+      fixed_frame: fixedFrameDraft === "auto" ? "" : fixedFrameDraft,
+      camera_stream_topic: cameraDraft || undefined,
     });
     await refreshStatus();
-  }, [mapTopicDraft, pathTopicDraft, refreshStatus]);
-
-  const applyPointcloudTopic = useCallback(async () => {
-    if (!pointcloudDraft) {
-      return;
-    }
-    await postApi("/api/pointcloud/select", { topic: pointcloudDraft });
-    await refreshStatus();
-  }, [pointcloudDraft, refreshStatus]);
+  }, [
+    cameraDraft,
+    depthTopicDraft,
+    detectionTopicDraft,
+    fixedFrameDraft,
+    mapTopicDraft,
+    pathTopicDraft,
+    pointcloudDraft,
+    refreshStatus,
+    rgbTopicDraft,
+    scanTopicDraft,
+  ]);
 
   const sendMotorBank = useCallback(async () => {
     await sendBase({ type: "motor_bank", left: leftBank, right: rightBank });
@@ -588,6 +798,65 @@ export default function App(): JSX.Element {
     () => (status?.recording?.recent || []).map((item) => ({ ...item, key: item.path })),
     [status?.recording?.recent],
   );
+
+  const copyDebugSnapshot = useCallback(async () => {
+    const payload = {
+      selected_topics: {
+        scan: scanTopicDraft || status?.visualizer?.scan?.topic,
+        rgb: rgbTopicDraft || status?.visualizer?.rgb?.topic,
+        depth: depthTopicDraft || status?.visualizer?.depth?.topic,
+        detections: detectionTopicDraft || status?.visualizer?.detections?.topic,
+        map: mapTopicDraft || status?.visualizer?.map?.topic,
+        plan: pathTopicDraft || status?.visualizer?.map?.selected_path_topic,
+        pointcloud: pointcloudDraft || status?.visualizer?.pointcloud?.selected_topic,
+      },
+      fixed_frame: {
+        selected: fixedFrameDraft,
+        resolved: status?.visualizer?.tf?.fixed_frame?.resolved,
+      },
+      missing_tf_pairs: status?.visualizer?.tf?.missing_pairs || [],
+      message_age_sec: {
+        scan: status?.visualizer?.scan?.age_sec,
+        rgb: status?.visualizer?.rgb?.age_sec,
+        depth: status?.visualizer?.depth?.age_sec,
+        detections: status?.visualizer?.detections?.age_sec,
+        map: status?.visualizer?.map?.age_sec,
+        odom: status?.health?.odom_age_sec,
+      },
+      manual_extrinsics: {
+        enabled: manualExtrinsicsEnabled,
+        ...manualExtrinsics,
+      },
+    };
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    messageApi.success("Debug snapshot copied");
+  }, [
+    depthTopicDraft,
+    detectionTopicDraft,
+    fixedFrameDraft,
+    manualExtrinsics,
+    manualExtrinsicsEnabled,
+    mapTopicDraft,
+    messageApi,
+    pathTopicDraft,
+    pointcloudDraft,
+    rgbTopicDraft,
+    scanTopicDraft,
+    status?.health?.odom_age_sec,
+    status?.visualizer?.depth?.age_sec,
+    status?.visualizer?.detections?.age_sec,
+    status?.visualizer?.detections?.topic,
+    status?.visualizer?.map?.age_sec,
+    status?.visualizer?.map?.selected_path_topic,
+    status?.visualizer?.map?.topic,
+    status?.visualizer?.pointcloud?.selected_topic,
+    status?.visualizer?.rgb?.age_sec,
+    status?.visualizer?.rgb?.topic,
+    status?.visualizer?.scan?.age_sec,
+    status?.visualizer?.scan?.topic,
+    status?.visualizer?.tf?.fixed_frame?.resolved,
+    status?.visualizer?.tf?.missing_pairs,
+  ]);
 
   const baseMenuItems = [
     { key: "operations", icon: <DashboardOutlined />, label: "Operations" },
@@ -698,165 +967,460 @@ export default function App(): JSX.Element {
   );
 
   const renderVisualizer = (): JSX.Element => {
-    const mapTopicOptions = status?.visualizer?.map?.available_map_topics || [];
-    const pathTopicOptions = status?.visualizer?.map?.available_path_topics || [];
+    const catalog = status?.visualizer?.topic_catalog;
+    const fixedInfo = status?.visualizer?.tf?.fixed_frame;
     const pose = mapOverlay?.robot_pose || status?.visualizer?.map?.pose;
+    const missingPairs = status?.visualizer?.tf?.missing_pairs || [];
+    const plannerActive = status?.visualizer?.map?.planner_active || false;
+    const pointcloudOptions = catalog?.pointcloud?.options || [];
+
+    const topicBadge = (options: Array<{ topic: string; publisher_count: number }>, topicName: string): JSX.Element | null => {
+      const item = options.find((opt) => opt.topic === topicName);
+      if (!item || item.publisher_count > 0) {
+        return null;
+      }
+      return <Tag color="warning">No publisher</Tag>;
+    };
+
+    const detectionItems = detectionPayload?.detections || [];
+    const detectionsForMinimap = showDetections ? detectionPayload : null;
 
     return (
-      <Row gutter={[16, 16]}>
-        <Col xs={24} xxl={14}>
-          <Card
-            className="hmi-card"
-            title="Waymo-Style 2D Mapping View"
-            extra={
-              <Space>
-                <Badge
-                  status={status?.visualizer?.map?.connected ? "success" : "error"}
-                  text={status?.visualizer?.map?.connected ? "/map Live" : "/map Waiting"}
-                />
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <Card className="hmi-card">
+          <Row gutter={[12, 8]} align="middle">
+            <Col xs={24} lg={14}>
+              <Space wrap>
+                <Tag color={status?.visualizer?.tf?.scan_to_fixed_ok ? "success" : "warning"}>
+                  TF {status?.visualizer?.tf?.scan_to_fixed_ok ? "OK" : "MISSING"}
+                </Tag>
+                <Text type="secondary">/tf age {secAge(status?.visualizer?.tf?.tf_age_sec)}</Text>
                 <Text type="secondary">scan {hz(status?.visualizer?.scan?.fps)}</Text>
-                <Text type="secondary">tf age {secAge(status?.visualizer?.map?.tf_age_sec)}</Text>
+                <Text type="secondary">rgb {hz(status?.visualizer?.rgb?.fps)}</Text>
+                <Text type="secondary">depth {hz(status?.visualizer?.depth?.fps)}</Text>
+                <Text type="secondary">det {hz(status?.visualizer?.detections?.fps)}</Text>
               </Space>
-            }
-          >
-            <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
-              <Select
-                style={{ width: "45%" }}
-                value={mapTopicDraft || undefined}
-                placeholder="Map topic"
-                options={mapTopicOptions.map((topic) => ({ value: topic, label: topic }))}
-                onChange={(value) => setMapTopicDraft(value)}
-              />
-              <Select
-                style={{ width: "45%" }}
-                value={pathTopicDraft || undefined}
-                placeholder="Path topic"
-                options={pathTopicOptions.map((topic) => ({ value: topic, label: topic }))}
-                onChange={(value) => setPathTopicDraft(value)}
-              />
-              <Button onClick={() => runAction("Map config applied", applyMapConfig)}>Apply</Button>
-            </Space.Compact>
-            <MapCanvas map={mapPayload} overlay={mapOverlay} />
-            <Row gutter={[12, 8]} style={{ marginTop: 10 }}>
-              <Col xs={24} md={12}>
-                <Text type="secondary">
-                  Pose:{" "}
-                  {pose
-                    ? `${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, yaw ${pose.yaw.toFixed(2)}`
-                    : "n/a"}
-                </Text>
-              </Col>
-              <Col xs={24} md={12}>
-                <Text type="secondary">
-                  Path: {pathTopicDraft || pathTopic || "n/a"} ({mapOverlay?.path_point_count || 0} pts)
-                </Text>
-              </Col>
-              <Col xs={24} md={12}>
-                <Text type="secondary">
-                  Map: {mapPayload?.width || 0}x{mapPayload?.height || 0} @{" "}
-                  {(mapPayload?.resolution || 0).toFixed(3)} m/px
-                </Text>
-              </Col>
-              <Col xs={24} md={12}>
-                <Text type="secondary">
-                  Scan overlay: {mapOverlay?.scan_point_count || 0} pts, age{" "}
-                  {secAge(mapOverlay?.scan_age_sec)}
-                </Text>
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-
-        <Col xs={24} xxl={10}>
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Card
-              className="hmi-card"
-              title="Live 3D Point Cloud"
-              extra={
-                <Space>
-                  <Badge
-                    status={status?.visualizer?.pointcloud?.connected ? "success" : "error"}
-                    text={status?.visualizer?.pointcloud?.connected ? "Live" : "Waiting"}
-                  />
-                  <Text type="secondary">{hz(status?.visualizer?.pointcloud?.fps)}</Text>
-                </Space>
-              }
-            >
-              <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
-                <Select
-                  style={{ width: "100%" }}
-                  value={pointcloudDraft || undefined}
-                  placeholder="PointCloud2 topic"
-                  options={pointcloudTopics.map((topic) => ({ value: topic, label: topic }))}
-                  onChange={(value) => setPointcloudDraft(value)}
-                />
-                <Button onClick={() => runAction("Pointcloud topic selected", applyPointcloudTopic)}>
-                  Apply
+            </Col>
+            <Col xs={24} lg={10}>
+              <Space wrap style={{ justifyContent: "flex-end", width: "100%" }}>
+                <Button size="small" onClick={() => runAction("Visualizer topics applied", applyVisualizerConfig)}>
+                  Apply Topics
                 </Button>
-              </Space.Compact>
-              <PointCloudCanvas cloud={pointcloudPayload} />
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary">
-                  Topic: {pointcloudDraft || status?.visualizer?.pointcloud?.selected_topic || "n/a"}
-                </Text>
-                <br />
-                <Text type="secondary">
-                  Age: {secAge(status?.visualizer?.pointcloud?.age_sec)} | Points:{" "}
-                  {pointcloudPayload?.point_count || 0}
-                </Text>
-              </div>
-            </Card>
+                <Button size="small" onClick={() => copyDebugSnapshot()}>
+                  Copy Debug Snapshot
+                </Button>
+              </Space>
+            </Col>
+          </Row>
+          {missingPairs.length ? (
+            <Alert
+              style={{ marginTop: 10 }}
+              type="warning"
+              showIcon
+              message={`Missing TF: ${missingPairs.join(", ")}`}
+              description="Rendering remains active in sensor-centric fallback mode."
+            />
+          ) : null}
+          {fixedInfo?.warnings?.length ? (
+            <Alert
+              style={{ marginTop: 10 }}
+              type="warning"
+              showIcon
+              message={fixedInfo.warnings.join(" | ")}
+            />
+          ) : null}
+          {!status?.visualizer?.tf?.has_base_link ? (
+            <Alert
+              style={{ marginTop: 10 }}
+              type="warning"
+              showIcon
+              message="No base_link frame found"
+              description="Robot pose falls back to /odom (if available) or origin."
+            />
+          ) : null}
+          {!status?.visualizer?.tf?.has_odom_base_tf ? (
+            <Alert
+              style={{ marginTop: 10 }}
+              type="warning"
+              showIcon
+              message="No odom->base_link TF"
+              description="Real moving map requires odom->base_link TF to be published continuously."
+            />
+          ) : null}
+        </Card>
 
+        <Row gutter={[16, 16]}>
+          <Col xs={24} xxl={17}>
+            <Card className="hmi-card" title="Fused View">
+              <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                <Space wrap>
+                  <Select
+                    style={{ minWidth: 220 }}
+                    value={scanTopicDraft || undefined}
+                    placeholder="LiDAR topic"
+                    options={(catalog?.scan?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setScanTopicDraft(value)}
+                  />
+                  {topicBadge(catalog?.scan?.options || [], scanTopicDraft || status?.visualizer?.scan?.topic || "")}
+                  <Select
+                    style={{ minWidth: 220 }}
+                    value={detectionTopicDraft || undefined}
+                    placeholder="Detections topic"
+                    options={(catalog?.detections?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setDetectionTopicDraft(value)}
+                  />
+                  {topicBadge(catalog?.detections?.options || [], detectionTopicDraft || status?.visualizer?.detections?.topic || "")}
+                  <Select
+                    style={{ minWidth: 160 }}
+                    value={fixedFrameDraft || "auto"}
+                    options={[
+                      { value: "auto", label: "Fixed: Auto" },
+                      { value: "map", label: "Fixed: map" },
+                      { value: "odom", label: "Fixed: odom" },
+                      { value: "base_link", label: "Fixed: base_link" },
+                    ]}
+                    onChange={(value) => setFixedFrameDraft(value)}
+                  />
+                  <Switch checked={showDetections} onChange={setShowDetections} checkedChildren="Detections" unCheckedChildren="Detections" />
+                  <Switch checked={showDepthBlend} onChange={setShowDepthBlend} checkedChildren="Depth" unCheckedChildren="Depth" />
+                </Space>
+                <FusedViewCanvas
+                  map={mapPayload}
+                  overlay={mapOverlay}
+                  detections={showDetections ? detectionPayload : null}
+                  layers={{
+                    map: true,
+                    scan: true,
+                    detections: showDetections,
+                    plan: true,
+                  }}
+                  manualExtrinsics={{
+                    enabled: manualExtrinsicsEnabled,
+                    x: manualExtrinsics.x,
+                    y: manualExtrinsics.y,
+                    yaw: manualExtrinsics.yaw,
+                  }}
+                />
+                <Row gutter={[12, 8]}>
+                  <Col xs={24} md={12}>
+                    <Text type="secondary">
+                      Fixed frame: {fixedInfo?.resolved || "n/a"} (selected {fixedInfo?.selected || "auto"})
+                    </Text>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Text type="secondary">
+                      Pose:{" "}
+                      {pose ? `${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, yaw ${pose.yaw.toFixed(2)} (${pose.source || "tf"})` : "unavailable"}
+                    </Text>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Text type="secondary">
+                      Detections: {detectionItems.length} | frame {detectionPayload?.frame_id || "n/a"}
+                    </Text>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Text type="secondary">
+                      Planner: {plannerActive ? "active" : "No planner active"}
+                    </Text>
+                  </Col>
+                </Row>
+              </Space>
+            </Card>
+          </Col>
+
+          <Col xs={24} xxl={7}>
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <Card className="hmi-card" title="Top-Down Minimap">
+                <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                  <FusedViewCanvas
+                    map={mapPayload}
+                    overlay={mapOverlay}
+                    detections={detectionsForMinimap}
+                    width={420}
+                    height={320}
+                    followPose
+                    layers={{ map: true, scan: true, detections: showDetections, plan: true }}
+                    manualExtrinsics={{
+                      enabled: manualExtrinsicsEnabled,
+                      x: manualExtrinsics.x,
+                      y: manualExtrinsics.y,
+                      yaw: manualExtrinsics.yaw,
+                    }}
+                  />
+                  <Space wrap>
+                    <Tag color="cyan">Scan</Tag>
+                    <Tag color="green">Plan</Tag>
+                    <Tag color="magenta">Detections</Tag>
+                    <Tag color="blue">Map</Tag>
+                  </Space>
+                  <Text type="secondary">
+                    Pose readout: {pose ? `${pose.x.toFixed(2)} m, ${pose.y.toFixed(2)} m, ${pose.yaw.toFixed(2)} rad` : `${fixedInfo?.resolved || "frame"} | pose unavailable`}
+                  </Text>
+                </Space>
+              </Card>
+
+              <Card className="hmi-card" title="Topic Sources">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Select
+                    value={rgbTopicDraft || undefined}
+                    placeholder="RGB topic"
+                    options={(catalog?.rgb?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setRgbTopicDraft(value)}
+                  />
+                  <Select
+                    value={depthTopicDraft || undefined}
+                    placeholder="Depth topic"
+                    options={(catalog?.depth?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setDepthTopicDraft(value)}
+                  />
+                  <Select
+                    value={mapTopicDraft || undefined}
+                    placeholder="Map topic"
+                    options={(catalog?.map?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setMapTopicDraft(value)}
+                  />
+                  <Select
+                    value={pathTopicDraft || undefined}
+                    placeholder="Plan topic"
+                    options={(catalog?.plans?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setPathTopicDraft(value)}
+                  />
+                  <Select
+                    value={pointcloudDraft || undefined}
+                    placeholder="PointCloud topic"
+                    options={pointcloudOptions.map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setPointcloudDraft(value)}
+                  />
+                </Space>
+              </Card>
+            </Space>
+          </Col>
+
+          <Col xs={24}>
             <Card
               className="hmi-card"
-              title="OAK-D RGB"
+              title="OAK-D RGB + Overlays"
               extra={
                 <Space>
-                  <Badge
-                    status={status?.visualizer?.camera?.connected ? "success" : "error"}
-                    text={status?.visualizer?.camera?.connected ? "Live" : "Disconnected"}
-                  />
-                  <Text type="secondary">{hz(status?.visualizer?.camera?.fps)}</Text>
+                  <Switch checked={showDetections} onChange={setShowDetections} checkedChildren="Detections" unCheckedChildren="Detections" />
+                  <Switch checked={showDepthBlend} onChange={setShowDepthBlend} checkedChildren="Depth blend" unCheckedChildren="Depth blend" />
                 </Space>
               }
             >
-              <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
-                <Select
-                  style={{ width: "100%" }}
-                  value={cameraDraft || undefined}
-                  placeholder="Select camera topic"
-                  options={cameraTopics.map((topic) => ({ value: topic, label: topic }))}
-                  onChange={(value) => setCameraDraft(value)}
-                />
-                <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>Apply</Button>
-              </Space.Compact>
-              <div className="camera-frame">
+              <div className="camera-frame camera-overlay-frame">
                 <img
                   src={`/stream/camera.mjpeg?topic=${encodeURIComponent(
                     cameraDraft || robot.selectedCameraTopic || "",
                   )}`}
                   alt="camera"
                 />
+                {showDepthBlend ? (
+                  <DepthHeatmapCanvas depth={depthPayload} className="camera-overlay-canvas camera-depth-overlay" />
+                ) : null}
+                {showDetections ? (
+                  <CameraDetectionOverlay detections={detectionPayload} className="camera-overlay-canvas camera-detection-overlay" />
+                ) : null}
               </div>
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary">Topic: {cameraDraft || robot.selectedCameraTopic || "n/a"}</Text>
-                <br />
-                <Text type="secondary">Age: {secAge(status?.visualizer?.camera?.age_sec)}</Text>
-              </div>
+              <Row gutter={[12, 8]} style={{ marginTop: 10 }}>
+                <Col xs={24} md={12}>
+                  <Text type="secondary">
+                    RGB: {status?.visualizer?.rgb?.topic || "n/a"} | {hz(status?.visualizer?.rgb?.fps)} | age {secAge(status?.visualizer?.rgb?.age_sec)}
+                  </Text>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text type="secondary">
+                    Depth: {status?.visualizer?.depth?.topic || "n/a"} | {hz(status?.visualizer?.depth?.fps)} | age {secAge(status?.visualizer?.depth?.age_sec)}
+                  </Text>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text type="secondary">
+                    Detections: {status?.visualizer?.detections?.topic || "n/a"} | {hz(status?.visualizer?.detections?.fps)} | age {secAge(status?.visualizer?.detections?.age_sec)}
+                  </Text>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text type="secondary">
+                    Camera info age: {secAge(status?.visualizer?.rgb?.camera_info_age_sec)}
+                  </Text>
+                </Col>
+              </Row>
               <Divider />
-              <Button
-                icon={<CameraOutlined />}
-                href={`https://studio.foxglove.dev/?ds=foxglove-websocket&ds.url=${encodeURIComponent(
-                  `ws://${window.location.hostname}:8765`,
-                )}`}
-                target="_blank"
-              >
-                Open Foxglove (ws://{window.location.hostname}:8765)
-              </Button>
+              <Space wrap>
+                <Select
+                  style={{ minWidth: 320 }}
+                  value={cameraDraft || undefined}
+                  placeholder="Camera MJPEG topic"
+                  options={cameraStreamTopics.map((topic) => ({ value: topic, label: topic }))}
+                  onChange={(value) => setCameraDraft(value)}
+                />
+                <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>Apply Camera Stream</Button>
+                <Button
+                  icon={<CameraOutlined />}
+                  href={`https://studio.foxglove.dev/?ds=foxglove-websocket&ds.url=${encodeURIComponent(
+                    `ws://${window.location.hostname}:8765`,
+                  )}`}
+                  target="_blank"
+                >
+                  Open Foxglove (ws://{window.location.hostname}:8765)
+                </Button>
+              </Space>
             </Card>
+          </Col>
+        </Row>
+
+        <Card className="hmi-card" title="Manual Extrinsics (TEMP/DEBUG)">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Alert
+              type={manualExtrinsicsEnabled ? "warning" : "info"}
+              showIcon
+              message="laser -> oak-d-base-frame (temporary UI transform)"
+              description={
+                status?.visualizer?.tf?.has_base_laser_tf && status?.visualizer?.tf?.has_base_oak_tf
+                  ? "Native TF is available. Keep this disabled."
+                  : "Use only while TF chain is missing. This is auto-disabled once real TF path exists."
+              }
+            />
+            <Space wrap>
+              <Switch checked={manualExtrinsicsEnabled} onChange={setManualExtrinsicsEnabled} />
+              <Text>Enable manual extrinsics</Text>
+            </Space>
+            <Row gutter={[8, 8]}>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="x"
+                  value={manualExtrinsics.x}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, x: Number(v || 0) }))}
+                />
+              </Col>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="y"
+                  value={manualExtrinsics.y}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, y: Number(v || 0) }))}
+                />
+              </Col>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="z"
+                  value={manualExtrinsics.z}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, z: Number(v || 0) }))}
+                />
+              </Col>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="roll"
+                  value={manualExtrinsics.roll}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, roll: Number(v || 0) }))}
+                />
+              </Col>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="pitch"
+                  value={manualExtrinsics.pitch}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, pitch: Number(v || 0) }))}
+                />
+              </Col>
+              <Col span={8}>
+                <InputNumber
+                  style={{ width: "100%" }}
+                  addonBefore="yaw"
+                  value={manualExtrinsics.yaw}
+                  step={0.01}
+                  onChange={(v) => setManualExtrinsics((prev) => ({ ...prev, yaw: Number(v || 0) }))}
+                />
+              </Col>
+            </Row>
           </Space>
-        </Col>
-      </Row>
+        </Card>
+
+        <Collapse
+          activeKey={rawFeedsOpen}
+          onChange={(keys) => setRawFeedsOpen(Array.isArray(keys) ? keys : [String(keys)])}
+          items={[
+            {
+              key: "raw",
+              label: "Raw Feeds (Debug)",
+              children: (
+                <Row gutter={[16, 16]}>
+                  <Col xs={24} xl={12}>
+                    <Card className="hmi-card" size="small" title="OAK RGB Raw">
+                      <div className="camera-frame">
+                        <img
+                          src={`/stream/camera.mjpeg?topic=${encodeURIComponent(
+                            cameraDraft || robot.selectedCameraTopic || "",
+                          )}`}
+                          alt="oak-rgb-raw"
+                        />
+                      </div>
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary">Topic: {status?.visualizer?.rgb?.topic || "n/a"}</Text>
+                        <br />
+                        <Text type="secondary">
+                          hz {hz(status?.visualizer?.rgb?.fps)} | age {secAge(status?.visualizer?.rgb?.age_sec)}
+                        </Text>
+                        <br />
+                        <Text type="secondary">
+                          encoding {status?.visualizer?.rgb?.encoding || "n/a"} | frame {status?.visualizer?.rgb?.frame_id || "n/a"}
+                        </Text>
+                      </div>
+                    </Card>
+                  </Col>
+                  <Col xs={24} xl={12}>
+                    <Card className="hmi-card" size="small" title="LiDAR Raw">
+                      <LidarCanvas scan={scanPayload} />
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary">Topic: {status?.visualizer?.scan?.topic || "n/a"}</Text>
+                        <br />
+                        <Text type="secondary">
+                          hz {hz(status?.visualizer?.scan?.fps)} | age {secAge(status?.visualizer?.scan?.age_sec)}
+                        </Text>
+                        <br />
+                        <Text type="secondary">
+                          angle [{(status?.visualizer?.scan?.angle_min || 0).toFixed(2)}, {(status?.visualizer?.scan?.angle_max || 0).toFixed(2)}] | range [{(status?.visualizer?.scan?.range_min || 0).toFixed(2)}, {(status?.visualizer?.scan?.range_max || 0).toFixed(2)}]
+                        </Text>
+                        <br />
+                        <Text type="secondary">
+                          samples {status?.visualizer?.scan?.sample_count || 0} | frame {status?.visualizer?.scan?.frame_id || "n/a"}
+                        </Text>
+                      </div>
+                    </Card>
+                  </Col>
+                </Row>
+              ),
+            },
+          ]}
+        />
+      </Space>
     );
   };
 

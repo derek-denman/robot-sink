@@ -7,6 +7,7 @@ const FRIENDLY_ERRORS: Record<string, string> = {
   navigate_to_pose_server_unavailable: "Nav2 NavigateToPose action server is unavailable.",
   nav2_msgs_not_available: "nav2_msgs is not available in this ROS environment.",
   no_active_goal: "No active navigation goal.",
+  unsupported_fixed_frame: "Fixed frame must be one of: map, odom, base_link, or auto.",
   service_unavailable: "Required ROS service is unavailable.",
   slam_save_service_unavailable: "SLAM save-map service is unavailable.",
   switch_to_localization_cmd_not_configured: "Localization switch command is not configured.",

@@ -46,6 +46,21 @@ for m in /sys/class/uio/uio0/maps/map*; do
 done
 ```
 
+## Moving-map TF alignment issues
+Check TF chain and odom source:
+```bash
+ros2 topic hz /tf
+ros2 topic hz /odom
+ros2 run tf2_ros tf2_echo odom base_link
+ros2 run tf2_ros tf2_echo base_link laser
+ros2 run tf2_ros tf2_echo base_link oak-d-base-frame
+```
+
+If `odom->base_link` is stale or missing, verify `base_bringup` launch:
+```bash
+ros2 launch base_bringup base_tf.launch.py
+```
+
 ## Encoder counts wrong direction or noisy
 Checks:
 - Confirm encoder A/B are buffered from 5V domain to 3.3V PRU inputs.

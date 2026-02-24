@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type {
+  DepthPayload,
+  DetectionPayload,
   MapOverlayPayload,
   MapPayload,
   PointcloudPayload,
@@ -41,6 +43,8 @@ type RobotState = {
   mapPayload: MapPayload | null;
   mapOverlay: MapOverlayPayload | null;
   pointcloudPayload: PointcloudPayload | null;
+  depthPayload: DepthPayload | null;
+  detectionPayload: DetectionPayload | null;
   selectedMode: RobotMode;
   selectedCameraTopic: string;
   modeReconciled: boolean;
@@ -63,6 +67,8 @@ type ConsoleStore = {
   setMapPayload: (map: MapPayload) => void;
   setMapOverlay: (overlay: MapOverlayPayload) => void;
   setPointcloudPayload: (payload: PointcloudPayload) => void;
+  setDepthPayload: (payload: DepthPayload) => void;
+  setDetectionPayload: (payload: DetectionPayload) => void;
   setSelectedMode: (mode: RobotMode, persist?: boolean) => void;
   setSelectedCameraTopic: (topic: string, persist?: boolean) => void;
   setModeReconciled: (value: boolean) => void;
@@ -83,6 +89,8 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
     mapPayload: null,
     mapOverlay: null,
     pointcloudPayload: null,
+    depthPayload: null,
+    detectionPayload: null,
     selectedMode: (readStorage(MODE_KEY, "manual") as RobotMode) || "manual",
     selectedCameraTopic: readStorage(CAMERA_TOPIC_KEY, ""),
     modeReconciled: false
@@ -136,6 +144,12 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
   },
   setPointcloudPayload: (payload) => {
     set((state) => ({ robot: { ...state.robot, pointcloudPayload: payload } }));
+  },
+  setDepthPayload: (payload) => {
+    set((state) => ({ robot: { ...state.robot, depthPayload: payload } }));
+  },
+  setDetectionPayload: (payload) => {
+    set((state) => ({ robot: { ...state.robot, detectionPayload: payload } }));
   },
   setSelectedMode: (mode, persist = true) => {
     set((state) => ({ robot: { ...state.robot, selectedMode: mode } }));
