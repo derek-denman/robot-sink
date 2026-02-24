@@ -8,6 +8,7 @@ A compact 4WD skid-steer mobile manipulator that navigates indoor space, finds t
 - BeagleBone base controller: deterministic base I/O and safety path for drivetrain
 - Primary Jetson <-> BeagleBone link: USB networking (`192.168.7.1` Jetson, `192.168.7.2` BeagleBone)
 - Fallback Jetson <-> BeagleBone link: USB serial
+- BeagleBone PRU runtime: UIO overlay (`AM335X-PRU-UIO-00A0.dtbo`) with shared-memory telemetry
 
 ## Hardware Baseline
 

@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SERVICE_SRC="${REPO_ROOT}/beaglebone/host_daemon/systemd/bbb-base-daemon.service"
 SERVICE_DST="/etc/systemd/system/bbb-base-daemon.service"
+UDEV_RULE_SRC="${REPO_ROOT}/beaglebone/host_daemon/udev/99-pruss-uio.rules"
+UDEV_RULE_DST="/etc/udev/rules.d/99-pruss-uio.rules"
 VENV_PY="${REPO_ROOT}/beaglebone/host_daemon/.venv/bin/python"
 MODE="normal"
 
@@ -15,7 +17,7 @@ Usage:
   ./beaglebone/scripts/enable_services.sh [--dry-run]
 
 Options:
-  --dry-run  Start bbb-base-daemon with --dry-run so it never opens RPMsg/GPIO.
+  --dry-run  Start bbb-base-daemon with --dry-run so it never opens UIO/GPIO.
 USAGE
 }
 
@@ -47,6 +49,19 @@ service_flags() {
   fi
 }
 
+install_uio_permissions() {
+  if [[ ! -f "${UDEV_RULE_SRC}" ]]; then
+    echo "[enable_services] WARNING: missing UIO udev rule source at ${UDEV_RULE_SRC}" >&2
+    return
+  fi
+
+  sudo install -m 0644 "${UDEV_RULE_SRC}" "${UDEV_RULE_DST}"
+  if command -v udevadm >/dev/null 2>&1; then
+    sudo udevadm control --reload-rules || true
+    sudo udevadm trigger --subsystem-match=uio || true
+  fi
+}
+
 parse_args "$@"
 
 if [[ ! -x "${VENV_PY}" ]]; then
@@ -63,6 +78,7 @@ sed -e "s|@REPO_ROOT@|${REPO_ROOT}|g" \
     "${SERVICE_SRC}" > "${TMP_SERVICE}"
 sudo install -m 0644 "${TMP_SERVICE}" "${SERVICE_DST}"
 rm -f "${TMP_SERVICE}"
+install_uio_permissions
 sudo systemctl daemon-reload
 sudo systemctl enable bbb-base-daemon.service
 sudo systemctl restart bbb-base-daemon.service
@@ -72,3 +88,4 @@ if [[ "${MODE}" == "dry-run" ]]; then
 else
   echo "bbb-base-daemon.service enabled and restarted"
 fi
+echo "verify UIO access: ls -l /dev/uio*"

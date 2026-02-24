@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BeagleBone base daemon: rpmsg bridge + safety logic + REST/WebSocket UI API."""
+"""BeagleBone base daemon: UIO bridge + safety logic + REST/WebSocket API."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from typing import Any
 from aiohttp import web, WSMsgType
 import yaml
 
-import protocol
-from hw import GPIOStopLine, RPMsgEndpoint
+from hw import GPIOStopLine
 from safety import SafetyController
+from uio_transport import UIOTransport
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -43,6 +43,8 @@ class DaemonState:
     last_motor_update_monotonic: float = 0.0
     pru0_online: bool = False
     pru1_online: bool = False
+    motor_applied_left: int = 0
+    motor_applied_right: int = 0
 
 
 class BBBBaseDaemon:
@@ -52,17 +54,13 @@ class BBBBaseDaemon:
         self.logger = logger
 
         pru_cfg = config.get("pru", {})
+        uio_cfg = pru_cfg.get("uio", {})
         sab_cfg = config.get("sabertooth", {})
         safety_cfg = config.get("safety", {})
         pins_cfg = config.get("pins", {}).get("sabertooth", {})
 
-        self.encoder_ep = RPMsgEndpoint(
-            pru_cfg.get("encoder_rpmsg_dev", "/dev/rpmsg_pru30"),
-            dry_run=dry_run,
-            logger=logger,
-        )
-        self.motor_ep = RPMsgEndpoint(
-            pru_cfg.get("motor_rpmsg_dev", "/dev/rpmsg_pru31"),
+        self.transport = UIOTransport(
+            uio_cfg,
             dry_run=dry_run,
             logger=logger,
         )
@@ -81,13 +79,11 @@ class BBBBaseDaemon:
 
         self.state = DaemonState()
         self._lock = asyncio.Lock()
-        self._sequence = 1
         self._tasks: list[asyncio.Task] = []
         self._ws_clients: set[web.WebSocketResponse] = set()
-        self._last_sent_motor: tuple[int, int] | None = None
+        self._last_sent_motor: tuple[int, int, bool, bool] | None = None
 
         self._rx_poll_hz = max(10.0, float(pru_cfg.get("rx_poll_hz", 250)))
-        self._encoder_poll_hz = max(1.0, float(pru_cfg.get("encoder_poll_hz", 25)))
         self._motor_tx_hz = max(5.0, float(pru_cfg.get("motor_tx_hz", 40)))
         self._ws_hz = max(2.0, float(config.get("api", {}).get("websocket_hz", 20)))
 
@@ -99,11 +95,7 @@ class BBBBaseDaemon:
         self._gui_root = Path(__file__).resolve().parents[1] / "gui" / "static"
 
         self._sab_mode_name = str(sab_cfg.get("mode", "packetized")).lower().strip()
-        self._sab_mode = (
-            protocol.BBB_SABER_MODE_SIMPLIFIED
-            if self._sab_mode_name == "simplified"
-            else protocol.BBB_SABER_MODE_PACKETIZED
-        )
+        self._sab_mode = 0 if self._sab_mode_name == "simplified" else 1
         self._sab_baud = int(sab_cfg.get("baud", 38400))
         self._sab_address = int(sab_cfg.get("address", 128))
         self._sab_tx_r30_bit = int(sab_cfg.get("tx_pru1_r30_bit", 0))
@@ -118,12 +110,6 @@ class BBBBaseDaemon:
     def _log_event(self, event: str, **fields: Any) -> None:
         payload = {"event": event, **fields}
         self.logger.info(json.dumps(payload, sort_keys=True))
-
-    def _next_seq(self) -> int:
-        self._sequence = (self._sequence + 1) & 0xFFFF
-        if self._sequence == 0:
-            self._sequence = 1
-        return self._sequence
 
     def _status(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -150,37 +136,23 @@ class BBBBaseDaemon:
             "pru": {
                 "encoder_online": self.state.pru0_online,
                 "motor_online": self.state.pru1_online,
+                "transport_error": self.transport.last_error or None,
+            },
+            "motor_feedback": {
+                "applied_left": self.state.motor_applied_left,
+                "applied_right": self.state.motor_applied_right,
             },
             "s2_stop_asserted": self.stop_gpio.asserted,
             "dry_run": self.dry_run,
         }
 
-    def _send_cmd(self, endpoint: RPMsgEndpoint, command: int, payload: bytes = b"", *, module: int) -> bool:
-        msg = protocol.build_message(
-            module=module,
-            msg_type=protocol.BBB_MSG_TYPE_COMMAND,
-            command=command,
-            sequence=self._next_seq(),
-            payload=payload,
+    def _configure_transport(self) -> None:
+        self.transport.configure_encoder(
+            sample_period_us=self._enc_sample_period_us,
+            velocity_interval_ms=self._enc_velocity_interval_ms,
+            stream_hz=self._enc_stream_hz,
         )
-        return endpoint.send(msg)
-
-    def _send_pru0_params(self) -> None:
-        payload = protocol.pack_enc_params(
-            self._enc_sample_period_us,
-            self._enc_velocity_interval_ms,
-            self._enc_stream_hz,
-        )
-        self._send_cmd(self.encoder_ep, protocol.BBB_CMD_SET_ENC_PARAMS, payload, module=protocol.BBB_MODULE_HOST)
-        self._send_cmd(
-            self.encoder_ep,
-            protocol.BBB_CMD_SET_STREAM,
-            protocol.pack_stream_config(self._enc_stream_hz),
-            module=protocol.BBB_MODULE_HOST,
-        )
-
-    def _send_pru1_params(self) -> None:
-        payload = protocol.pack_sabertooth_params(
+        self.transport.configure_motor(
             baud=self._sab_baud,
             mode=self._sab_mode,
             address=self._sab_address,
@@ -190,40 +162,17 @@ class BBBBaseDaemon:
             ramp_step=self._sab_ramp_step,
             control_period_us=self._sab_control_period_us,
         )
-        self._send_cmd(self.motor_ep, protocol.BBB_CMD_SET_SABER_PARAMS, payload, module=protocol.BBB_MODULE_HOST)
-
-    def _send_pru1_estop(self, asserted: bool) -> None:
-        self._send_cmd(
-            self.motor_ep,
-            protocol.BBB_CMD_SET_ESTOP,
-            protocol.pack_estop(asserted),
-            module=protocol.BBB_MODULE_HOST,
-        )
-
-    def _send_pru1_motor(self, left: int, right: int) -> None:
-        self._send_cmd(
-            self.motor_ep,
-            protocol.BBB_CMD_SET_MOTOR,
-            protocol.pack_motor(left, right),
-            module=protocol.BBB_MODULE_HOST,
-        )
+        self.transport.write_motor_command(0, 0, armed=False, estop=True)
 
     async def start(self) -> None:
-        self.encoder_ep.open()
-        self.motor_ep.open()
+        self.transport.open()
 
         self.stop_gpio.setup()
         self.stop_gpio.assert_stop()
-
-        # Safe by default: force estop state on startup.
-        self._send_pru1_params()
-        self._send_pru0_params()
-        self._send_pru1_estop(True)
-        self._send_pru1_motor(0, 0)
+        self._configure_transport()
 
         self._tasks = [
-            asyncio.create_task(self._rx_loop(), name="rx_loop"),
-            asyncio.create_task(self._encoder_poll_loop(), name="encoder_poll_loop"),
+            asyncio.create_task(self._telemetry_loop(), name="telemetry_loop"),
             asyncio.create_task(self._motor_tx_loop(), name="motor_tx_loop"),
             asyncio.create_task(self._watchdog_loop(), name="watchdog_loop"),
             asyncio.create_task(self._ws_broadcast_loop(), name="ws_broadcast_loop"),
@@ -240,8 +189,8 @@ class BBBBaseDaemon:
                 pass
 
         self.stop_gpio.assert_stop()
-        self.encoder_ep.close()
-        self.motor_ep.close()
+        self.transport.write_motor_command(0, 0, armed=False, estop=True)
+        self.transport.close()
         self._log_event("daemon_stopped")
 
     async def _trip_estop(self, reason: str) -> None:
@@ -252,8 +201,7 @@ class BBBBaseDaemon:
             self.state.right_cmd = 0
 
             self.stop_gpio.assert_stop()
-            self._send_pru1_estop(True)
-            self._send_pru1_motor(0, 0)
+            self.transport.write_motor_command(0, 0, armed=False, estop=True)
             self._log_event("estop_asserted", reason=reason)
 
     async def _arm(self) -> tuple[bool, str]:
@@ -264,8 +212,7 @@ class BBBBaseDaemon:
 
             self.state.left_cmd = 0
             self.state.right_cmd = 0
-            self._send_pru1_estop(False)
-            self._send_pru1_motor(0, 0)
+            self.transport.write_motor_command(0, 0, armed=True, estop=False)
             self.stop_gpio.release_stop()
             self._log_event("armed")
             return True, ""
@@ -298,82 +245,47 @@ class BBBBaseDaemon:
 
         return int(left_norm * self._command_scale), int(right_norm * self._command_scale)
 
-    async def _rx_loop(self) -> None:
+    async def _telemetry_loop(self) -> None:
         period = 1.0 / self._rx_poll_hz
         while True:
-            self._drain_endpoint(self.encoder_ep, protocol.BBB_MODULE_PRU0)
-            self._drain_endpoint(self.motor_ep, protocol.BBB_MODULE_PRU1)
-            await asyncio.sleep(period)
+            snapshot = self.transport.read_encoder_snapshot()
+            if snapshot is not None:
+                timestamp_us = int(snapshot.get("timestamp_us", 0))
+                if timestamp_us != self.state.encoder_timestamp_us:
+                    self.state.encoder_updated_monotonic = time.monotonic()
 
-    def _drain_endpoint(self, endpoint: RPMsgEndpoint, expected_module: int) -> None:
-        for raw in endpoint.recv_all():
-            msg = protocol.parse_message(raw)
-            if msg is None:
-                continue
-            if msg.module != expected_module:
-                continue
-
-            if expected_module == protocol.BBB_MODULE_PRU0:
-                self.state.pru0_online = True
-                self._handle_pru0_message(msg)
+                self.state.encoder_timestamp_us = timestamp_us
+                self.state.encoder_counts = list(snapshot.get("counts", [0, 0, 0, 0]))
+                self.state.encoder_velocity_tps = list(snapshot.get("velocity_tps", [0, 0, 0, 0]))
+                self.state.pru0_online = bool(snapshot.get("pru0_online", False))
+                self.state.pru1_online = bool(snapshot.get("pru1_online", False))
+                self.state.motor_applied_left = int(snapshot.get("motor_applied_left", 0))
+                self.state.motor_applied_right = int(snapshot.get("motor_applied_right", 0))
             else:
-                self.state.pru1_online = True
-                self._handle_pru1_message(msg)
+                self.state.pru0_online = False
+                self.state.pru1_online = False
 
-    def _handle_pru0_message(self, msg: protocol.Message) -> None:
-        if msg.command != protocol.BBB_CMD_GET_SNAPSHOT:
-            return
-
-        snapshot = protocol.unpack_encoder_snapshot(msg.payload)
-        if snapshot is None:
-            return
-
-        self.state.encoder_counts = snapshot["counts"]
-        self.state.encoder_velocity_tps = snapshot["velocity_tps"]
-        self.state.encoder_timestamp_us = snapshot["timestamp_us"]
-        self.state.encoder_updated_monotonic = time.monotonic()
-
-    def _handle_pru1_message(self, msg: protocol.Message) -> None:
-        if msg.command not in (protocol.BBB_CMD_ACK, protocol.BBB_CMD_NACK):
-            return
-
-        ack = protocol.unpack_ack(msg.payload)
-        if ack is None:
-            return
-
-        if msg.command == protocol.BBB_CMD_NACK:
-            self._log_event(
-                "pru1_nack",
-                sequence=msg.sequence,
-                detail=ack["detail"],
-                status=ack["status"],
-            )
-
-    async def _encoder_poll_loop(self) -> None:
-        period = 1.0 / self._encoder_poll_hz
-        while True:
-            self._send_cmd(
-                self.encoder_ep,
-                protocol.BBB_CMD_GET_SNAPSHOT,
-                b"",
-                module=protocol.BBB_MODULE_HOST,
-            )
             await asyncio.sleep(period)
 
     async def _motor_tx_loop(self) -> None:
         period = 1.0 / self._motor_tx_hz
         while True:
             safety = self.safety.snapshot()
-            if safety.armed and not safety.estop_asserted:
+            armed = safety.armed and not safety.estop_asserted
+            estop = not armed
+
+            if armed:
                 left = self.state.left_cmd
                 right = self.state.right_cmd
             else:
                 left = 0
                 right = 0
 
-            if (safety.armed and not safety.estop_asserted) or self._last_sent_motor != (left, right):
-                self._send_pru1_motor(left, right)
-                self._last_sent_motor = (left, right)
+            command_key = (left, right, armed, estop)
+            if armed or self._last_sent_motor != command_key:
+                self.transport.write_motor_command(left, right, armed=armed, estop=estop)
+                self._last_sent_motor = command_key
+
             await asyncio.sleep(period)
 
     async def _watchdog_loop(self) -> None:
@@ -444,13 +356,8 @@ class BBBBaseDaemon:
         return web.json_response({"ok": True, "status": self._status()})
 
     async def api_reset_encoders(self, _: web.Request) -> web.Response:
-        self._send_cmd(
-            self.encoder_ep,
-            protocol.BBB_CMD_RESET_COUNTS,
-            b"",
-            module=protocol.BBB_MODULE_HOST,
-        )
-        return web.json_response({"ok": True})
+        ok = self.transport.reset_encoders()
+        return web.json_response({"ok": bool(ok)})
 
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=20)

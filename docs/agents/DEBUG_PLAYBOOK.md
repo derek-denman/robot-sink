@@ -23,27 +23,28 @@ ping -c 3 192.168.7.2
 ssh debian@192.168.7.2
 ```
 
-## PRU firmware won’t start
+## PRU telemetry not live
 ```bash
-for rp in /sys/class/remoteproc/remoteproc1 /sys/class/remoteproc/remoteproc2; do
-  echo "$rp state=$(cat "$rp/state" 2>/dev/null) firmware=$(cat "$rp/firmware" 2>/dev/null)"
+ls -l /dev/uio*
+for u in /sys/class/uio/uio*; do echo "== $u"; cat "$u/name"; done
+journalctl -u bbb-base-daemon.service -b -n 120 --no-pager -l
+```
+
+Check API:
+```bash
+curl -s http://127.0.0.1:8080/api/status | jq '.dry_run, .pru, .encoder.timestamp_us, .encoder.counts, .encoder.velocity_tps'
+```
+
+## UIO map details
+```bash
+lsmod | grep -E 'uio|pruss'
+for m in /sys/class/uio/uio0/maps/map*; do
+  echo "== $m"
+  cat "$m/name"
+  cat "$m/addr"
+  cat "$m/size"
 done
-dmesg -T | tail -n 80
 ```
-
-Retry deploy:
-```bash
-./beaglebone/scripts/deploy_firmware.sh
-```
-
-## RPMsg device nodes missing
-```bash
-dmesg -T | grep -i rpmsg
-ls -l /dev/rpmsg*
-```
-
-If nodes differ from defaults, update:
-- `beaglebone/host_daemon/config.yaml`
 
 ## Encoder counts wrong direction or noisy
 Checks:
