@@ -23,7 +23,7 @@ Usage:
 
 Modes:
   --plan    Show current state and planned persistent workaround changes.
-  --apply   Back up /boot/uEnv.txt, force PRU UIO overlay, remove addr4 overlay, and enable daemon --dry-run service.
+  --apply   Back up /boot/uEnv.txt, force PRU UIO overlay, remove addr4 overlay, and enable live daemon service.
   --revert  Restore newest backup and restore daemon service to normal mode.
 USAGE
 }
@@ -199,8 +199,8 @@ print_plan() {
     action_count=$((action_count + 1))
   fi
 
-  if ! service_uses_dry_run; then
-    log "plan: install/restart bbb-base-daemon.service in --dry-run mode"
+  if service_uses_dry_run; then
+    log "plan: reinstall/restart bbb-base-daemon.service in live mode (without --dry-run)"
     action_count=$((action_count + 1))
   fi
 
@@ -234,8 +234,8 @@ apply_workaround() {
   fi
 
   ensure_service_prereqs
-  "${ENABLE_SERVICES_SCRIPT}" --dry-run
-  log "installed/restarted bbb-base-daemon.service with --dry-run"
+  "${ENABLE_SERVICES_SCRIPT}"
+  log "installed/restarted bbb-base-daemon.service in live mode"
   log "reboot required for PRU overlay changes to take effect"
 }
 

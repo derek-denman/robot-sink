@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import type { RobotMode, ScanPayload, StatusPayload } from "../types";
+import type {
+  MapOverlayPayload,
+  MapPayload,
+  PointcloudPayload,
+  RobotMode,
+  ScanPayload,
+  StatusPayload,
+} from "../types";
 
 const MODE_KEY = "robot_console_hmi.mode";
 const CAMERA_TOPIC_KEY = "robot_console_hmi.camera_topic";
@@ -31,6 +38,9 @@ type TransportState = {
 type RobotState = {
   status: StatusPayload | null;
   scanPayload: ScanPayload | null;
+  mapPayload: MapPayload | null;
+  mapOverlay: MapOverlayPayload | null;
+  pointcloudPayload: PointcloudPayload | null;
   selectedMode: RobotMode;
   selectedCameraTopic: string;
   modeReconciled: boolean;
@@ -50,6 +60,9 @@ type ConsoleStore = {
   setWsStateLabel: (label: string) => void;
   setStatus: (status: StatusPayload) => void;
   setScanPayload: (scan: ScanPayload) => void;
+  setMapPayload: (map: MapPayload) => void;
+  setMapOverlay: (overlay: MapOverlayPayload) => void;
+  setPointcloudPayload: (payload: PointcloudPayload) => void;
   setSelectedMode: (mode: RobotMode, persist?: boolean) => void;
   setSelectedCameraTopic: (topic: string, persist?: boolean) => void;
   setModeReconciled: (value: boolean) => void;
@@ -67,6 +80,9 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
   robot: {
     status: null,
     scanPayload: null,
+    mapPayload: null,
+    mapOverlay: null,
+    pointcloudPayload: null,
     selectedMode: (readStorage(MODE_KEY, "manual") as RobotMode) || "manual",
     selectedCameraTopic: readStorage(CAMERA_TOPIC_KEY, ""),
     modeReconciled: false
@@ -111,6 +127,15 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
   },
   setScanPayload: (scan) => {
     set((state) => ({ robot: { ...state.robot, scanPayload: scan } }));
+  },
+  setMapPayload: (map) => {
+    set((state) => ({ robot: { ...state.robot, mapPayload: map } }));
+  },
+  setMapOverlay: (overlay) => {
+    set((state) => ({ robot: { ...state.robot, mapOverlay: overlay } }));
+  },
+  setPointcloudPayload: (payload) => {
+    set((state) => ({ robot: { ...state.robot, pointcloudPayload: payload } }));
   },
   setSelectedMode: (mode, persist = true) => {
     set((state) => ({ robot: { ...state.robot, selectedMode: mode } }));

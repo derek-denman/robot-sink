@@ -1,9 +1,26 @@
 pru:
-  encoder_rpmsg_dev: /dev/rpmsg_pru30
-  motor_rpmsg_dev: /dev/rpmsg_pru31
+  transport: uio
   rx_poll_hz: 250
-  encoder_poll_hz: 25
   motor_tx_hz: 40
+  uio:
+    expected_names: [pruss_evt0]
+    mem_uio_name: pruss_evt0
+    map_index: 0
+    map_name: pruss
+    shared_offset: 65536        # 0x10000 PRUSS shared RAM
+    shared_size: 512
+    heartbeat_timeout_ms: 1000
+    startup_timeout_ms: 2500
+    auto_start_prus: true
+
+    pru0_ctrl_offset: 139264    # 0x22000
+    pru1_ctrl_offset: 147456    # 0x24000
+    pru0_iram_offset: 212992    # 0x34000
+    pru1_iram_offset: 229376    # 0x38000
+    pru_iram_size: 8192         # 0x2000
+
+    pru0_fw_bin: ../pru_fw/pru0_encoders/am335x-pru0-fw.bin
+    pru1_fw_bin: ../pru_fw/pru1_sabertooth/am335x-pru1-fw.bin
 
 encoder:
   sample_period_us: 20

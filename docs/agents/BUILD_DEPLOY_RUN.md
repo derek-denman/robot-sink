@@ -33,10 +33,9 @@ export PRU_SSP=/home/debian/pru-software-support-package
 export PRU_CMD_FILE=/home/debian/pru-software-support-package/include/am335x-pru.cmd
 ```
 
-Build and deploy PRU firmware:
+Build PRU firmware:
 ```bash
 ./beaglebone/scripts/build_pru.sh
-./beaglebone/scripts/deploy_firmware.sh
 ```
 
 Start host daemon (manual first), then service:
@@ -68,16 +67,17 @@ colcon build --symlink-install
 
 ## Expected Outputs
 
-### Remoteproc state checks
+### UIO state checks
 ```bash
-for rp in /sys/class/remoteproc/remoteproc*; do
-  echo "$rp firmware=$(cat "$rp/firmware" 2>/dev/null) state=$(cat "$rp/state" 2>/dev/null)"
+ls -l /dev/uio*
+for u in /sys/class/uio/uio*; do
+  echo "$u name=$(cat "$u/name" 2>/dev/null)"
 done
 ```
-Expected: both PRU remoteprocs show firmware names `am335x-pru0-fw` / `am335x-pru1-fw` and `state=running`.
+Expected: `/dev/uio*` exists and names include `pruss_evt*`.
 
-### RPMsg device nodes (if applicable)
+### Live telemetry check
 ```bash
-ls -l /dev/rpmsg_pru30 /dev/rpmsg_pru31
+curl -s http://127.0.0.1:8080/api/status | jq '.dry_run, .pru, .encoder.timestamp_us, .encoder.counts, .encoder.velocity_tps'
 ```
-Expected: nodes exist; if names differ, update `beaglebone/host_daemon/config.yaml` (`pru.encoder_rpmsg_dev`, `pru.motor_rpmsg_dev`).
+Expected: `dry_run=false`, `pru.encoder_online=true`, and `timestamp_us` advances.

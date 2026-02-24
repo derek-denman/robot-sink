@@ -8,6 +8,7 @@ A compact 4WD skid-steer mobile manipulator that navigates indoor space, finds t
 - BeagleBone base controller: deterministic base I/O and safety path for drivetrain
 - Primary Jetson <-> BeagleBone link: USB networking (`192.168.7.1` Jetson, `192.168.7.2` BeagleBone)
 - Fallback Jetson <-> BeagleBone link: USB serial
+- BeagleBone PRU runtime: UIO overlay (`AM335X-PRU-UIO-00A0.dtbo`) with shared-memory telemetry
 
 ## Hardware Baseline
 
@@ -89,7 +90,10 @@ Robot Console is hosted on the Jetson and served by the `robot_console` ROS back
 
 - Open from Mac/Linux/Windows browser: `http://JETSON_IP:8080`
 - Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
-- Built-in visualizer: live lidar canvas + OAK-D MJPEG stream + FPS/age status
+- Built-in visualizer:
+  - live 2D occupancy map (`/map`) with `/scan` + robot pose + path overlays
+  - live 3D point-cloud view (`PointCloud2`, topic-selectable)
+  - OAK-D MJPEG stream + FPS/age status
 - Foxglove bridge: `ws://JETSON_IP:8765`
 - UI source: `jetson/console/ui/` (React + TypeScript + Ant Design)
 - Runtime assets served from: `jetson/console/web/`
@@ -103,6 +107,7 @@ ssh -N -L 8765:127.0.0.1:8765 jetson@JETSON_IP
 Then connect Foxglove to `ws://localhost:8765`.
 
 See `jetson/console/README.md` for controls, configuration, and troubleshooting.
+Sensor placement prerequisites are in `jetson/docs/05_usb_devices_and_udev.md`.
 
 ### 6) Optional boot-time service
 

@@ -1,15 +1,21 @@
 {
-  "name": "Robot Console - Map, Scan, TF, OAK",
-  "description": "Reference Foxglove layout for the Robot Console stack.",
+  "name": "Robot Console - Mapping + Perception",
+  "description": "Reference Foxglove layout for map/scan/tf/path + OAK-D image + point cloud.",
   "notes": [
     "Connect to ws://<jetson>:8765 using Foxglove Web/Desktop.",
     "Set the 3D panel fixed frame to map.",
-    "Primary topics: /map, /scan, /tf, /tf_static, /oak/rgb/image_raw, /odom"
+    "Primary topics: /map, /scan, /tf, /tf_static, /plan, /oak/rgb/image_raw, /cloud_map"
   ],
   "panels": {
     "3d": {
       "frame": "map",
-      "layers": ["OccupancyGrid:/map", "LaserScan:/scan", "TF:/tf", "Pose:/odom"]
+      "layers": [
+        "OccupancyGrid:/map",
+        "LaserScan:/scan",
+        "TF:/tf",
+        "Path:/plan",
+        "PointCloud2:/cloud_map"
+      ]
     },
     "image": {
       "topic": "/oak/rgb/image_raw"

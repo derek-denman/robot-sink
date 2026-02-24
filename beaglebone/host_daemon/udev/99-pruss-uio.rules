@@ -1,0 +1,2 @@
+# Allow bbb-base-daemon (User=debian) to open PRU UIO devices at boot.
+SUBSYSTEM=="uio", KERNEL=="uio*", GROUP="debian", MODE="0660"

@@ -31,6 +31,13 @@ Paths:
 - Console config: `jetson/console/console_config.yaml`
 - Foxglove layout seed: `jetson/console/layouts/foxglove_layout.json`
 
+Built-in Mapping / Visualization page now includes:
+
+- 2D occupancy map (`/map`) with live `/scan` overlay in map frame
+- robot pose arrow from TF chain (`map -> odom -> base_link`)
+- optional Nav2 path overlay from configurable path topic
+- live 3D point-cloud panel (`PointCloud2` topic selectable)
+
 ## Build Steps
 
 Backend package:
@@ -116,10 +123,14 @@ print('mode', d['mode'])
 print('scan_fps', d['visualizer']['scan']['fps'])
 print('camera_fps', d['visualizer']['camera']['fps'])
 print('camera_topic', d['visualizer']['camera']['selected_topic'])
+print('map_topic', d['visualizer']['map']['topic'])
+print('map_connected', d['visualizer']['map']['connected'])
+print('pointcloud_topic', d['visualizer']['pointcloud']['selected_topic'])
+print('pointcloud_connected', d['visualizer']['pointcloud']['connected'])
 PY
 ```
 
-Expected: mode populated, scan FPS > 0, camera FPS > 0 when OAK driver is healthy.
+Expected: mode populated, scan FPS > 0, and map/pointcloud fields returned.
 
 3. Verify websocket telemetry updates:
 
@@ -137,7 +148,7 @@ asyncio.run(main())
 PY
 ```
 
-Expected: includes `status` and `scan`.
+Expected: includes `status`, `scan`, and when available `map`, `map_overlay`, `pointcloud`.
 
 4. Verify mode persistence and reconnect behavior:
 
@@ -222,7 +233,34 @@ timeout 8 ros2 topic hz /oak/rgb/image_raw
 
 Expected: `/scan` non-zero; camera non-zero when OAK is publishing.
 
-8. Verify Foxglove bridge socket:
+8. Verify mapping stack topics and TF:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 topic list | grep -E '/map|/scan|cloud|points'
+timeout 8 ros2 topic hz /scan
+ros2 topic echo /map --once | sed -n '1,40p'
+ros2 run tf2_ros tf2_echo map base_link | sed -n '1,20p'
+```
+
+Expected:
+
+- `/scan` always present with non-zero rate.
+- `/map` appears when `slam_toolbox` is running.
+- `tf2_echo` shows valid `map -> base_link` updates when localization is active.
+
+9. Verify 3D point cloud source (if available):
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 topic list | grep -E 'cloud|points'
+# Example check when /cloud_map exists:
+timeout 8 ros2 topic hz /cloud_map
+```
+
+Expected: non-zero rate for selected pointcloud topic when source pipeline is running.
+
+10. Verify Foxglove bridge socket:
 
 ```bash
 nc -vz 127.0.0.1 8765
@@ -230,7 +268,7 @@ nc -vz 127.0.0.1 8765
 
 Expected: connection succeeded.
 
-9. Verify recording:
+11. Verify recording:
 
 ```bash
 python3 - <<'PY'

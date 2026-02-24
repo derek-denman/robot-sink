@@ -64,8 +64,17 @@ Use this workflow:
 - Safe-stop hold: `300 ms`
 - Arm required after every estop/watchdog event
 
-## RPMsg Kernel Workaround Mode
+## UIO Runtime Notes
 
-If BeagleBone is running the plan-of-record RPMsg workaround (`pru_rpmsg_uio_workaround.sh --apply`), the daemon service runs in `--dry-run` mode.
+When `uboot_overlay_pru=AM335X-PRU-UIO-00A0.dtbo` is active, PRU1 reads motor commands from shared memory and transmits Sabertooth serial directly.
 
-In this mode, Sabertooth serial writes are intentionally disabled and drivetrain motion commands are no-op for safety and system stability.
+Verify live mode:
+
+```bash
+curl -s http://127.0.0.1:8080/api/status | jq '.dry_run, .pru'
+```
+
+Expected:
+
+- `dry_run=false`
+- `pru.motor_online=true` when PRU1 heartbeat is active

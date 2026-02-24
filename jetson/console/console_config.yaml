@@ -11,7 +11,11 @@ safety:
 
 streaming:
   scan_push_hz: 8.0
+  map_push_hz: 2.0
+  pointcloud_push_hz: 4.0
   camera_stream_hz: 12.0
+  scan_overlay_points: 520
+  pointcloud_max_points: 4500
 
 manual_control:
   bank_linear_scale: 0.8
@@ -52,10 +56,18 @@ arm:
 
 topics:
   cmd_vel: /cmd_vel
+  map: /map
   scan: /scan
   odom: /odom
   tf: /tf
   tf_static: /tf_static
+  map_frame: map
+  base_frame: base_link
+  path_topics:
+    - /plan
+    - /global_plan
+    - /local_plan
+  pointcloud: /cloud_map
   camera_topics:
     - /oak/rgb/image_raw
     - /oak/stereo/image_raw

@@ -18,6 +18,7 @@ export type SafetySnapshot = {
 };
 
 export type ScanPoint = [number, number];
+export type Point3 = [number, number, number];
 
 export type ScanPayload = {
   stamp_unix: number;
@@ -26,6 +27,55 @@ export type ScanPayload = {
   range_max: number;
   point_count: number;
   points: ScanPoint[];
+  map_frame?: string;
+  point_count_map?: number;
+  points_map?: ScanPoint[];
+};
+
+export type MapPayload = {
+  stamp_unix: number;
+  frame_id: string;
+  width: number;
+  height: number;
+  resolution: number;
+  origin: {
+    x: number;
+    y: number;
+    yaw: number;
+  };
+  encoding: "rle_u8" | string;
+  cell_count: number;
+  data_rle: Array<[number, number]>;
+};
+
+export type MapOverlayPayload = {
+  stamp_unix: number;
+  map_frame: string;
+  scan_topic: string;
+  scan_points: ScanPoint[];
+  scan_point_count: number;
+  scan_age_sec: number | null;
+  robot_pose: {
+    x: number;
+    y: number;
+    yaw: number;
+    stamp_unix: number;
+    frame_id: string;
+    base_frame: string;
+  } | null;
+  path_topic: string;
+  path_points: ScanPoint[];
+  path_point_count: number;
+  tf_age_sec: number | null;
+};
+
+export type PointcloudPayload = {
+  stamp_unix: number;
+  topic: string;
+  frame_id: string;
+  point_count: number;
+  source_points?: number;
+  points: Point3[];
 };
 
 export type CameraMetric = {
@@ -52,6 +102,42 @@ export type ScanStreamStatus = {
   age_sec: number | null;
   point_count: number;
   connected: boolean;
+};
+
+export type MapStreamStatus = {
+  topic: string;
+  fps: number;
+  age_sec: number | null;
+  connected: boolean;
+  map_available: boolean;
+  frame_id: string;
+  width: number;
+  height: number;
+  resolution: number;
+  tf_age_sec: number | null;
+  scan_rate_hz: number;
+  pose: {
+    x: number;
+    y: number;
+    yaw: number;
+    stamp_unix: number;
+    frame_id: string;
+    base_frame: string;
+  } | null;
+  selected_path_topic: string;
+  available_map_topics: string[];
+  available_path_topics: string[];
+  path_rate_hz: number;
+};
+
+export type PointcloudStreamStatus = {
+  selected_topic: string;
+  available_topics: string[];
+  fps: number;
+  age_sec: number | null;
+  connected: boolean;
+  frame_id: string | null;
+  point_count: number;
 };
 
 export type ArmJointConfig = {
@@ -141,6 +227,8 @@ export type StatusPayload = {
   visualizer: {
     scan: ScanStreamStatus;
     camera: CameraStreamStatus;
+    map: MapStreamStatus;
+    pointcloud: PointcloudStreamStatus;
   };
   arm: {
     joints: ArmJointConfig[];
@@ -168,4 +256,7 @@ export type ApiResult<T = unknown> = {
 export type WsEvent =
   | { type: "status"; data: StatusPayload }
   | { type: "scan"; data: ScanPayload }
+  | { type: "map"; data: MapPayload }
+  | { type: "map_overlay"; data: MapOverlayPayload }
+  | { type: "pointcloud"; data: PointcloudPayload }
   | { type: string; data: Record<string, unknown> };
