@@ -2666,15 +2666,18 @@ class RosAdapters:
         selected = self._camera_stream_topic
         if selected:
             for metric in metrics:
-                if metric.get("topic") == selected:
+                if metric.get("topic") == selected and metric.get("connected", False):
                     return
 
         connected_topics = [metric for metric in metrics if metric.get("connected")]
         if not connected_topics:
             return
 
-        # Prefer highest observed FPS among connected topics.
-        connected_topics.sort(key=lambda item: float(item.get("fps", 0.0)), reverse=True)
+        # Prefer highest observed FPS among connected topics, then freshest frame age.
+        connected_topics.sort(
+            key=lambda item: (float(item.get("fps", 0.0)), -float(item.get("age_sec", 9999.0))),
+            reverse=True,
+        )
         best_topic = str(connected_topics[0].get("topic", "")).strip()
         if best_topic:
             self._camera_stream_topic = best_topic

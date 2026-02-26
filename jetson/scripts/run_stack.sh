@@ -36,6 +36,7 @@ ROBOT_CONSOLE_CONFIG="${ROBOT_CONSOLE_CONFIG:-${ROBOT_ROOT}/jetson/console/conso
 ROBOT_CONSOLE_WEB_ROOT="${ROBOT_CONSOLE_WEB_ROOT:-${ROBOT_ROOT}/jetson/console/web}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
 BASE_BRINGUP_CONFIG="${BASE_BRINGUP_CONFIG:-${ROBOT_ROOT}/ros_ws/src/base_bringup/config/base_bringup.yaml}"
+OAK_PARAMS_FILE="${OAK_PARAMS_FILE:-${ROBOT_ROOT}/jetson/config/depthai_camera.yaml}"
 export ROBOT_CONSOLE_CONFIG ROBOT_CONSOLE_WEB_ROOT FOXGLOVE_PORT BASE_BRINGUP_CONFIG
 
 mkdir -p "${LOG_DIR}"
@@ -103,7 +104,7 @@ start_cmd() {
   local logfile="${LOG_DIR}/${name}.log"
 
   log "Starting ${name}: ${cmd}"
-  bash -lc "${cmd}" >>"${logfile}" 2>&1 &
+  bash -lc "exec 9>&- 2>/dev/null || true; ${cmd}" >>"${logfile}" 2>&1 &
 
   local pid="$!"
   PIDS+=("${pid}")
@@ -197,11 +198,19 @@ fi
 if [[ -n "${OAK_LAUNCH_CMD:-}" ]]; then
   start_cmd "oakd" "${OAK_LAUNCH_CMD}"
 elif ros_pkg_exists depthai_ros_driver; then
+  OAK_PARAMS_ARG=""
+  if [[ -f "${OAK_PARAMS_FILE}" ]]; then
+    OAK_PARAMS_ARG="params_file:=${OAK_PARAMS_FILE}"
+    log "Using OAK params file: ${OAK_PARAMS_FILE}"
+  else
+    log "OAK params file not found (${OAK_PARAMS_FILE}); using depthai defaults."
+  fi
+
   if process_running "[d]epthai_ros_driver camera.launch.py"; then
     log "Detected existing depthai launch process; reusing existing OAK runtime."
     start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver already running; using existing process'"
   else
-    start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py" 5)"
+    start_cmd "oakd" "$(retry_loop_cmd "oakd" "ros2 launch depthai_ros_driver camera.launch.py ${OAK_PARAMS_ARG}" 5)"
   fi
 else
   start_cmd "oakd" "python3 ${SCRIPT_DIR}/runtime_stub.py --name oakd --hint 'depthai_ros_driver not found; running stub'"
