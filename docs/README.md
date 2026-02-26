@@ -7,6 +7,12 @@
 - `docs/demo_runbook.md`
 - `docs/jetson.md`
 
+## Perception Docs
+- `docs/perception/toy_shoe_i0_runbook.md`
+- `docs/perception/cvat_labels_toy_shoe.json`
+- `docs/perception/i0_capture_manifest.csv`
+- `docs/perception/i0_report_template.md`
+
 ## Agent Docs
 - `docs/agents/INDEX.md`
 - `docs/agents/ARCHITECTURE.md`
