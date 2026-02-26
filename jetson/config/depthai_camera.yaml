@@ -1,0 +1,25 @@
+/**:
+  ros__parameters:
+    camera:
+      i_enable_imu: true
+      i_enable_ir: true
+      i_nn_type: spatial
+      i_pipeline_type: RGBD
+    rgb:
+      # Avoid lazy transport stalls; keep RGB stream continuously available.
+      i_enable_lazy_publisher: false
+      i_publish_topic: true
+    stereo:
+      # Stereo depth stays raw-only to avoid invalid compressed (16UC1) conversions.
+      i_enable_lazy_publisher: false
+      i_publish_topic: true
+    oak:
+      rgb:
+        image_raw:
+          enable_pub_plugins:
+            - image_transport/compressed
+            - image_transport/raw
+      stereo:
+        image_raw:
+          enable_pub_plugins:
+            - image_transport/raw

@@ -15,6 +15,7 @@ Default behavior:
 - Starts `foxglove_bridge`, `robot_console`, OAK-D, RPLIDAR, RoArm stub, task stub, and BB bridge
 - Uses real ROS nodes when installed; falls back to stubs where needed
 - Writes logs under `jetson/logs/`
+- Uses OAK params from `jetson/config/depthai_camera.yaml` when present (override with `OAK_PARAMS_FILE=...`)
 
 ## Robot Console Quick Start
 

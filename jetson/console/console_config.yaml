@@ -97,9 +97,9 @@ topics:
     - /oak/rgb/image_raw
     - /oak/stereo/image_raw
   camera_compressed_topics:
-    - /oak/rgb/image_rect/compressed
     - /oak/rgb/image_raw/compressed
-  camera_stream_topic: /oak/rgb/image_rect/compressed
+    - /oak/rgb/image_rect/compressed
+  camera_stream_topic: /oak/rgb/image_raw/compressed
   navigate_to_pose: /navigate_to_pose
   initial_pose: /initialpose
   slam_pause: /slam_toolbox/pause_new_measurements

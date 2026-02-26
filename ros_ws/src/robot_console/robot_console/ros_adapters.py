@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -67,6 +68,15 @@ class RosAdapters:
         self._node = node
         self._config = config
         self._lock = threading.Lock()
+        # Keep compressed camera callbacks isolated so they are not starved by
+        # heavier default-group callbacks (scan/depth/map processing).
+        self._camera_stream_cb_group = ReentrantCallbackGroup()
+        self._camera_stream_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         topics = config.get("topics", {})
         manual_cfg = config.get("manual_control", {})
@@ -1462,7 +1472,8 @@ class RosAdapters:
             CompressedImage,
             topic_name,
             self._make_camera_stream_callback(topic_name),
-            qos_profile_sensor_data,
+            self._camera_stream_qos,
+            callback_group=self._camera_stream_cb_group,
         )
 
     def _remember_frames(self, msg: TFMessage) -> None:
@@ -2666,15 +2677,18 @@ class RosAdapters:
         selected = self._camera_stream_topic
         if selected:
             for metric in metrics:
-                if metric.get("topic") == selected:
+                if metric.get("topic") == selected and metric.get("connected", False):
                     return
 
         connected_topics = [metric for metric in metrics if metric.get("connected")]
         if not connected_topics:
             return
 
-        # Prefer highest observed FPS among connected topics.
-        connected_topics.sort(key=lambda item: float(item.get("fps", 0.0)), reverse=True)
+        # Prefer highest observed FPS among connected topics, then freshest frame age.
+        connected_topics.sort(
+            key=lambda item: (float(item.get("fps", 0.0)), -float(item.get("age_sec", 9999.0))),
+            reverse=True,
+        )
         best_topic = str(connected_topics[0].get("topic", "")).strip()
         if best_topic:
             self._camera_stream_topic = best_topic

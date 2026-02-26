@@ -46,7 +46,7 @@ npm run build:web
 - Watchdog timeout disarms and publishes stop
 - `Stop All` publishes zero base command, cancels nav goal, stops arm, and disarms
 - Mode is backend source-of-truth and survives WS reconnects/refresh
-- Camera topic selection is operator-sticky (no auto-overwrite while selected topic remains available)
+- Camera topic selection is operator-sticky while healthy; stale selections auto-fallback to a live stream topic
 
 ## Visualizers
 
