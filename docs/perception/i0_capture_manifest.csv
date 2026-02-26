@@ -1,0 +1,13 @@
+session_id,split_group,scene_type,lighting_id,background_id,bag_path,notes,cvat_task_id,cvat_export_zip,status
+s01,toy_only,toy_only,l1,bg1,,,,planned
+s02,toy_only,toy_only,l2,bg2,,,,planned
+s03,toy_only,toy_only,l1,bg3,,,,planned
+s04,shoe_only,shoe_only,l1,bg1,,,,planned
+s05,shoe_only,shoe_only,l2,bg4,,,,planned
+s06,shoe_only,shoe_only,l2,bg2,,,,planned
+s07,mixed_clutter,mixed_clutter,l1,bg3,,,,planned
+s08,mixed_clutter,mixed_clutter,l2,bg4,,,,planned
+s09,mixed_clutter,mixed_clutter,l1,bg2,,,,planned
+s10,mixed_clutter,mixed_clutter,l2,bg1,,,,planned
+s11,empty_floor,empty_floor,l1,bg4,,,,planned
+s12,empty_floor,empty_floor,l2,bg3,,,,planned
