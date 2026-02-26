@@ -53,6 +53,7 @@ import type {
   DetectionPayload,
   LogSource,
   MapOverlayPayload,
+  ObstacleMapPayload,
   MapPayload,
   PointcloudPayload,
   RobotMode,
@@ -122,6 +123,7 @@ export default function App(): JSX.Element {
     setStatus,
     setScanPayload,
     setMapPayload,
+    setObstacleMapPayload,
     setMapOverlay,
     setPointcloudPayload,
     setDepthPayload,
@@ -140,6 +142,7 @@ export default function App(): JSX.Element {
   const [cameraReconciled, setCameraReconciled] = useState(false);
   const [mapTopicDraft, setMapTopicDraft] = useState("");
   const [pathTopicDraft, setPathTopicDraft] = useState("");
+  const [costmapTopicDraft, setCostmapTopicDraft] = useState("");
   const [pointcloudDraft, setPointcloudDraft] = useState("");
   const [scanTopicDraft, setScanTopicDraft] = useState("");
   const [rgbTopicDraft, setRgbTopicDraft] = useState("");
@@ -148,6 +151,15 @@ export default function App(): JSX.Element {
   const [fixedFrameDraft, setFixedFrameDraft] = useState("auto");
   const [showDepthBlend, setShowDepthBlend] = useState(false);
   const [showDetections, setShowDetections] = useState(true);
+  const [showMapLayer, setShowMapLayer] = useState(true);
+  const [showScanLayer, setShowScanLayer] = useState(true);
+  const [showPlanLayer, setShowPlanLayer] = useState(true);
+  const [showTfChainOverlay, setShowTfChainOverlay] = useState(false);
+  const [showAxesOverlay, setShowAxesOverlay] = useState(true);
+  const [mainFollowMode, setMainFollowMode] = useState(true);
+  const [fusedRecenterToken, setFusedRecenterToken] = useState(0);
+  const [mainRenderStats, setMainRenderStats] = useState({ fps: 0, droppedFrames: 0 });
+  const [miniRenderStats, setMiniRenderStats] = useState({ fps: 0, droppedFrames: 0 });
   const [rawFeedsOpen, setRawFeedsOpen] = useState<string[]>(["raw"]);
   const [manualExtrinsicsEnabled, setManualExtrinsicsEnabled] = useState(false);
   const [manualExtrinsics, setManualExtrinsics] = useState({
@@ -194,6 +206,7 @@ export default function App(): JSX.Element {
   const motionActive = motionDeadlineMs > Date.now();
   const scanPayload = robot.scanPayload;
   const mapPayload = robot.mapPayload;
+  const obstacleMapPayload = robot.obstacleMapPayload;
   const mapOverlay = robot.mapOverlay;
   const depthPayload = robot.depthPayload;
   const detectionPayload = robot.detectionPayload;
@@ -237,6 +250,10 @@ export default function App(): JSX.Element {
           setMapPayload(payload.data as MapPayload);
           return;
         }
+        if (payload.type === "obstacle_map") {
+          setObstacleMapPayload(payload.data as ObstacleMapPayload);
+          return;
+        }
         if (payload.type === "map_overlay") {
           setMapOverlay(payload.data as MapOverlayPayload);
           return;
@@ -275,6 +292,7 @@ export default function App(): JSX.Element {
     setCameraReconciled,
     setMapOverlay,
     setMapPayload,
+    setObstacleMapPayload,
     setDepthPayload,
     setDetectionPayload,
     setModeReconciled,
@@ -331,6 +349,13 @@ export default function App(): JSX.Element {
   }, [pathTopic, pathTopicDraft]);
 
   useEffect(() => {
+    if (costmapTopicDraft || !status?.visualizer?.obstacle_map?.selected_topic) {
+      return;
+    }
+    setCostmapTopicDraft(status.visualizer.obstacle_map.selected_topic);
+  }, [costmapTopicDraft, status?.visualizer?.obstacle_map?.selected_topic]);
+
+  useEffect(() => {
     if (!pointcloudDraft && status?.visualizer?.pointcloud?.selected_topic) {
       setPointcloudDraft(status.visualizer.pointcloud.selected_topic);
     }
@@ -383,12 +408,16 @@ export default function App(): JSX.Element {
       }
       const parsed = JSON.parse(raw) as {
         fixedFrame?: string;
+        mainFollowMode?: boolean;
+        showTfChainOverlay?: boolean;
+        showAxesOverlay?: boolean;
         topics?: {
           scan?: string;
           rgb?: string;
           depth?: string;
           detections?: string;
           map?: string;
+          costmap?: string;
           path?: string;
           pointcloud?: string;
           camera_stream?: string;
@@ -421,6 +450,9 @@ export default function App(): JSX.Element {
       if (parsed.topics?.map) {
         setMapTopicDraft(parsed.topics.map);
       }
+      if (parsed.topics?.costmap) {
+        setCostmapTopicDraft(parsed.topics.costmap);
+      }
       if (parsed.topics?.path) {
         setPathTopicDraft(parsed.topics.path);
       }
@@ -432,6 +464,15 @@ export default function App(): JSX.Element {
       }
       if (typeof parsed.manualExtrinsicsEnabled === "boolean") {
         setManualExtrinsicsEnabled(parsed.manualExtrinsicsEnabled);
+      }
+      if (typeof parsed.mainFollowMode === "boolean") {
+        setMainFollowMode(parsed.mainFollowMode);
+      }
+      if (typeof parsed.showTfChainOverlay === "boolean") {
+        setShowTfChainOverlay(parsed.showTfChainOverlay);
+      }
+      if (typeof parsed.showAxesOverlay === "boolean") {
+        setShowAxesOverlay(parsed.showAxesOverlay);
       }
       if (parsed.manualExtrinsics) {
         setManualExtrinsics((prev) => ({
@@ -457,10 +498,14 @@ export default function App(): JSX.Element {
         depth: depthTopicDraft,
         detections: detectionTopicDraft,
         map: mapTopicDraft,
+        costmap: costmapTopicDraft,
         path: pathTopicDraft,
         pointcloud: pointcloudDraft,
         camera_stream: cameraDraft,
       },
+      mainFollowMode,
+      showTfChainOverlay,
+      showAxesOverlay,
       manualExtrinsicsEnabled,
       manualExtrinsics,
     };
@@ -474,13 +519,17 @@ export default function App(): JSX.Element {
     depthTopicDraft,
     detectionTopicDraft,
     fixedFrameDraft,
+    mainFollowMode,
     manualExtrinsics,
     manualExtrinsicsEnabled,
     mapTopicDraft,
+    costmapTopicDraft,
     pathTopicDraft,
     pointcloudDraft,
     rgbTopicDraft,
     scanTopicDraft,
+    showAxesOverlay,
+    showTfChainOverlay,
   ]);
 
   useEffect(() => {
@@ -770,6 +819,7 @@ export default function App(): JSX.Element {
       depth_topic: depthTopicDraft || undefined,
       detection_topic: detectionTopicDraft || undefined,
       map_topic: mapTopicDraft || undefined,
+      costmap_topic: costmapTopicDraft || undefined,
       path_topic: pathTopicDraft || undefined,
       pointcloud_topic: pointcloudDraft || undefined,
       fixed_frame: fixedFrameDraft === "auto" ? "" : fixedFrameDraft,
@@ -782,6 +832,7 @@ export default function App(): JSX.Element {
     detectionTopicDraft,
     fixedFrameDraft,
     mapTopicDraft,
+    costmapTopicDraft,
     pathTopicDraft,
     pointcloudDraft,
     refreshStatus,
@@ -836,6 +887,7 @@ export default function App(): JSX.Element {
         depth: depthTopicDraft || status?.visualizer?.depth?.topic,
         detections: detectionTopicDraft || status?.visualizer?.detections?.topic,
         map: mapTopicDraft || status?.visualizer?.map?.topic,
+        costmap: costmapTopicDraft || status?.visualizer?.obstacle_map?.selected_topic,
         plan: pathTopicDraft || status?.visualizer?.map?.selected_path_topic,
         pointcloud: pointcloudDraft || status?.visualizer?.pointcloud?.selected_topic,
       },
@@ -850,7 +902,29 @@ export default function App(): JSX.Element {
         depth: status?.visualizer?.depth?.age_sec,
         detections: status?.visualizer?.detections?.age_sec,
         map: status?.visualizer?.map?.age_sec,
+        obstacle_map: status?.visualizer?.obstacle_map?.age_sec,
         odom: status?.health?.odom_age_sec,
+      },
+      obstacle_map: {
+        source: status?.visualizer?.obstacle_map?.source,
+        frame_id: status?.visualizer?.obstacle_map?.frame_id,
+        width: status?.visualizer?.obstacle_map?.width,
+        height: status?.visualizer?.obstacle_map?.height,
+        resolution: status?.visualizer?.obstacle_map?.resolution,
+        depth_fusion_enabled: status?.visualizer?.obstacle_map?.depth_fusion_enabled,
+        warnings: status?.visualizer?.obstacle_map?.warnings || [],
+      },
+      view: {
+        follow: mainFollowMode,
+        show_tf_chain_overlay: showTfChainOverlay,
+        show_axes_overlay: showAxesOverlay,
+        layers: {
+          map: showMapLayer,
+          scan: showScanLayer,
+          plan: showPlanLayer,
+          detections: showDetections,
+          depth: showDepthBlend,
+        },
       },
       manual_extrinsics: {
         enabled: manualExtrinsicsEnabled,
@@ -863,6 +937,8 @@ export default function App(): JSX.Element {
     depthTopicDraft,
     detectionTopicDraft,
     fixedFrameDraft,
+    costmapTopicDraft,
+    mainFollowMode,
     manualExtrinsics,
     manualExtrinsicsEnabled,
     mapTopicDraft,
@@ -871,6 +947,13 @@ export default function App(): JSX.Element {
     pointcloudDraft,
     rgbTopicDraft,
     scanTopicDraft,
+    showAxesOverlay,
+    showDepthBlend,
+    showDetections,
+    showMapLayer,
+    showPlanLayer,
+    showScanLayer,
+    showTfChainOverlay,
     status?.health?.odom_age_sec,
     status?.visualizer?.depth?.age_sec,
     status?.visualizer?.detections?.age_sec,
@@ -878,6 +961,15 @@ export default function App(): JSX.Element {
     status?.visualizer?.map?.age_sec,
     status?.visualizer?.map?.selected_path_topic,
     status?.visualizer?.map?.topic,
+    status?.visualizer?.obstacle_map?.age_sec,
+    status?.visualizer?.obstacle_map?.depth_fusion_enabled,
+    status?.visualizer?.obstacle_map?.frame_id,
+    status?.visualizer?.obstacle_map?.height,
+    status?.visualizer?.obstacle_map?.resolution,
+    status?.visualizer?.obstacle_map?.selected_topic,
+    status?.visualizer?.obstacle_map?.source,
+    status?.visualizer?.obstacle_map?.warnings,
+    status?.visualizer?.obstacle_map?.width,
     status?.visualizer?.pointcloud?.selected_topic,
     status?.visualizer?.rgb?.age_sec,
     status?.visualizer?.rgb?.topic,
@@ -1002,6 +1094,7 @@ export default function App(): JSX.Element {
     const pose = mapOverlay?.robot_pose || status?.visualizer?.map?.pose;
     const missingPairs = status?.visualizer?.tf?.missing_pairs || [];
     const plannerActive = status?.visualizer?.map?.planner_active || false;
+    const obstacleStatus = status?.visualizer?.obstacle_map;
     const pointcloudOptions = catalog?.pointcloud?.options || [];
 
     const topicBadge = (options: Array<{ topic: string; publisher_count: number }>, topicName: string): JSX.Element | null => {
@@ -1014,6 +1107,26 @@ export default function App(): JSX.Element {
 
     const detectionItems = detectionPayload?.detections || [];
     const detectionsForMinimap = showDetections ? detectionPayload : null;
+    const scanPointsPresent = Boolean(
+      (mapOverlay?.scan_points?.length || 0) > 0 || (mapOverlay?.scan_points_sensor?.length || 0) > 0,
+    );
+    const planPointsPresent = Boolean((mapOverlay?.path_points?.length || 0) > 0);
+    const hasObstacleLayer = Boolean(obstacleMapPayload?.data_rle?.length);
+    const hasMapLayer = Boolean(mapPayload?.data_rle?.length);
+
+    const missingInputReasons: string[] = [];
+    if (showMapLayer && !hasObstacleLayer && !hasMapLayer) {
+      missingInputReasons.push("No map/costmap payload yet");
+    }
+    if (showScanLayer && !scanPointsPresent) {
+      missingInputReasons.push("No scan points yet");
+    }
+    if (showPlanLayer && !planPointsPresent) {
+      missingInputReasons.push("No local plan topic publishing");
+    }
+    if (showDetections && detectionItems.length === 0) {
+      missingInputReasons.push("No detections in current frame");
+    }
 
     return (
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -1029,6 +1142,13 @@ export default function App(): JSX.Element {
                 <Text type="secondary">rgb {hz(status?.visualizer?.rgb?.fps)}</Text>
                 <Text type="secondary">depth {hz(status?.visualizer?.depth?.fps)}</Text>
                 <Text type="secondary">det {hz(status?.visualizer?.detections?.fps)}</Text>
+                <Text type="secondary">obs {hz(obstacleStatus?.fps)}</Text>
+                <Text type="secondary">main {hz(mainRenderStats.fps)} fps</Text>
+                <Text type="secondary">mini {hz(miniRenderStats.fps)} fps</Text>
+                <Text type="secondary">drops m:{mainRenderStats.droppedFrames} mini:{miniRenderStats.droppedFrames}</Text>
+                <Tag color={obstacleStatus?.source === "nav2" ? "blue" : "gold"}>
+                  obstacle {obstacleStatus?.source || "none"}
+                </Tag>
               </Space>
             </Col>
             <Col xs={24} lg={10}>
@@ -1077,11 +1197,20 @@ export default function App(): JSX.Element {
               description="Real moving map requires odom->base_link TF to be published continuously."
             />
           ) : null}
+          {missingInputReasons.length ? (
+            <Alert
+              style={{ marginTop: 10 }}
+              type="info"
+              showIcon
+              message="Visualizer is rendering partial data"
+              description={missingInputReasons.join(" | ")}
+            />
+          ) : null}
         </Card>
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xxl={17}>
-            <Card className="hmi-card" title="Fused View">
+            <Card className="hmi-card" title="3D / BEV Fused View">
               <Space direction="vertical" style={{ width: "100%" }} size={10}>
                 <Space wrap>
                   <Select
@@ -1117,18 +1246,64 @@ export default function App(): JSX.Element {
                     ]}
                     onChange={(value) => setFixedFrameDraft(value)}
                   />
+                  <Segmented
+                    options={[
+                      { value: "follow", label: "Follow" },
+                      { value: "free", label: "Free Pan" },
+                    ]}
+                    value={mainFollowMode ? "follow" : "free"}
+                    onChange={(value) => setMainFollowMode(value === "follow")}
+                  />
+                  <Button
+                    onClick={() => {
+                      setMainFollowMode(true);
+                      setFusedRecenterToken((prev) => prev + 1);
+                    }}
+                  >
+                    Recenter
+                  </Button>
+                  <Switch checked={showMapLayer} onChange={setShowMapLayer} checkedChildren="Map" unCheckedChildren="Map" />
+                  <Switch checked={showScanLayer} onChange={setShowScanLayer} checkedChildren="Scan" unCheckedChildren="Scan" />
+                  <Switch checked={showPlanLayer} onChange={setShowPlanLayer} checkedChildren="Plan" unCheckedChildren="Plan" />
                   <Switch checked={showDetections} onChange={setShowDetections} checkedChildren="Detections" unCheckedChildren="Detections" />
                   <Switch checked={showDepthBlend} onChange={setShowDepthBlend} checkedChildren="Depth" unCheckedChildren="Depth" />
+                  <Switch checked={showTfChainOverlay} onChange={setShowTfChainOverlay} checkedChildren="TF chain" unCheckedChildren="TF chain" />
+                  <Switch checked={showAxesOverlay} onChange={setShowAxesOverlay} checkedChildren="Axes" unCheckedChildren="Axes" />
                 </Space>
                 <FusedViewCanvas
                   map={mapPayload}
+                  obstacleMap={showMapLayer ? obstacleMapPayload : null}
                   overlay={mapOverlay}
                   detections={showDetections ? detectionPayload : null}
+                  followPose={mainFollowMode}
+                  panEnabled={!mainFollowMode}
+                  recenterSignal={fusedRecenterToken}
+                  onPanStart={() => setMainFollowMode(false)}
+                  showTfOverlay={showTfChainOverlay}
+                  showAxesOverlay={showAxesOverlay}
+                  tfChain={{
+                    fixed_frame: fixedInfo?.resolved || "n/a",
+                    selected_fixed_frame: fixedInfo?.selected || "auto",
+                    scan_to_fixed_ok: Boolean(status?.visualizer?.tf?.scan_to_fixed_ok),
+                    detections_to_fixed_ok: Boolean(status?.visualizer?.tf?.detections_to_fixed_ok),
+                    has_odom_base_tf: Boolean(status?.visualizer?.tf?.has_odom_base_tf),
+                    has_base_laser_tf: Boolean(status?.visualizer?.tf?.has_base_laser_tf),
+                    has_base_oak_tf: Boolean(status?.visualizer?.tf?.has_base_oak_tf),
+                    missing_pairs: missingPairs,
+                  }}
+                  onRenderStats={(stats) =>
+                    setMainRenderStats({
+                      fps: stats.fps,
+                      droppedFrames: stats.droppedFrames,
+                    })
+                  }
                   layers={{
-                    map: true,
-                    scan: true,
+                    map: showMapLayer,
+                    obstacle: showMapLayer,
+                    scan: showScanLayer,
                     detections: showDetections,
-                    plan: true,
+                    plan: showPlanLayer,
+                    drivable: true,
                   }}
                   manualExtrinsics={{
                     enabled: manualExtrinsicsEnabled,
@@ -1156,7 +1331,7 @@ export default function App(): JSX.Element {
                   </Col>
                   <Col xs={24} md={12}>
                     <Text type="secondary">
-                      Planner: {plannerActive ? "active" : "No planner active"}
+                      Planner: {plannerActive ? "active" : "No planner active"} | obs {obstacleStatus?.source || "none"}
                     </Text>
                   </Col>
                 </Row>
@@ -1170,12 +1345,28 @@ export default function App(): JSX.Element {
                 <Space direction="vertical" style={{ width: "100%" }} size={8}>
                   <FusedViewCanvas
                     map={mapPayload}
+                    obstacleMap={showMapLayer ? obstacleMapPayload : null}
                     overlay={mapOverlay}
                     detections={detectionsForMinimap}
                     width={420}
                     height={320}
                     followPose
-                    layers={{ map: true, scan: true, detections: showDetections, plan: true }}
+                    panEnabled={false}
+                    showAxesOverlay={showAxesOverlay}
+                    onRenderStats={(stats) =>
+                      setMiniRenderStats({
+                        fps: stats.fps,
+                        droppedFrames: stats.droppedFrames,
+                      })
+                    }
+                    layers={{
+                      map: showMapLayer,
+                      obstacle: showMapLayer,
+                      scan: showScanLayer,
+                      detections: showDetections,
+                      plan: showPlanLayer,
+                      drivable: true,
+                    }}
                     manualExtrinsics={{
                       enabled: manualExtrinsicsEnabled,
                       x: manualExtrinsics.x,
@@ -1184,10 +1375,17 @@ export default function App(): JSX.Element {
                     }}
                   />
                   <Space wrap>
-                    <Tag color="cyan">Scan</Tag>
-                    <Tag color="green">Plan</Tag>
+                    <Switch size="small" checked={showScanLayer} onChange={setShowScanLayer} checkedChildren="Scan" unCheckedChildren="Scan" />
+                    <Switch size="small" checked={showDepthBlend} onChange={setShowDepthBlend} checkedChildren="Depth" unCheckedChildren="Depth" />
+                    <Switch size="small" checked={showDetections} onChange={setShowDetections} checkedChildren="Boxes" unCheckedChildren="Boxes" />
+                    <Switch size="small" checked={showPlanLayer} onChange={setShowPlanLayer} checkedChildren="Plan" unCheckedChildren="Plan" />
+                    <Switch size="small" checked={showMapLayer} onChange={setShowMapLayer} checkedChildren="Map" unCheckedChildren="Map" />
+                  </Space>
+                  <Space wrap>
+                    <Tag color="green">Local plan</Tag>
+                    <Tag color="orange">Drivable area</Tag>
+                    <Tag color="cyan">LiDAR returns</Tag>
                     <Tag color="magenta">Detections</Tag>
-                    <Tag color="blue">Map</Tag>
                   </Space>
                   <Text type="secondary">
                     Pose readout: {pose ? `${pose.x.toFixed(2)} m, ${pose.y.toFixed(2)} m, ${pose.yaw.toFixed(2)} rad` : `${fixedInfo?.resolved || "frame"} | pose unavailable`}
@@ -1223,6 +1421,15 @@ export default function App(): JSX.Element {
                       label: `${opt.topic} (${opt.publisher_count})`,
                     }))}
                     onChange={(value) => setMapTopicDraft(value)}
+                  />
+                  <Select
+                    value={costmapTopicDraft || undefined}
+                    placeholder="Costmap topic"
+                    options={(catalog?.costmap?.options || []).map((opt) => ({
+                      value: opt.topic,
+                      label: `${opt.topic} (${opt.publisher_count})`,
+                    }))}
+                    onChange={(value) => setCostmapTopicDraft(value)}
                   />
                   <Select
                     value={pathTopicDraft || undefined}

@@ -7,6 +7,17 @@ type Props = {
 
 export function CameraDetectionOverlay({ detections, className = "" }: Props): JSX.Element {
   const items = detections?.detections || [];
+
+  const colorFor = (classId: string): string => {
+    let hash = 0;
+    for (let i = 0; i < classId.length; i += 1) {
+      hash = (hash << 5) - hash + classId.charCodeAt(i);
+      hash |= 0;
+    }
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 92%, 62%)`;
+  };
+
   return (
     <svg className={className} viewBox="0 0 1 1" preserveAspectRatio="none">
       {items.map((item) => {
@@ -21,6 +32,8 @@ export function CameraDetectionOverlay({ detections, className = "" }: Props): J
         const x = cx - rw * 0.5;
         const y = cy - rh * 0.5;
         const label = `${item.class_id || item.id} ${(Number(item.score || 0) * 100).toFixed(0)}%`;
+        const color = colorFor(String(item.class_id || item.id || "obj"));
+        const labelW = Math.max(0.06, Math.min(0.28, label.length * 0.012));
         return (
           <g key={`${item.id}-${cx.toFixed(4)}-${cy.toFixed(4)}`}>
             {rw > 0.001 && rh > 0.001 ? (
@@ -29,18 +42,29 @@ export function CameraDetectionOverlay({ detections, className = "" }: Props): J
                 y={y}
                 width={rw}
                 height={rh}
-                fill="rgba(255, 62, 204, 0.14)"
-                stroke="rgba(255, 74, 210, 0.95)"
+                rx={0.004}
+                fill={`${color}33`}
+                stroke={color}
                 strokeWidth={0.003}
               />
             ) : null}
-            <circle cx={cx} cy={cy} r={0.006} fill="rgba(255, 122, 227, 0.95)" />
+            <rect
+              x={Math.max(0.001, Math.min(0.999 - labelW, cx + 0.006))}
+              y={Math.max(0.001, cy - 0.034)}
+              width={labelW}
+              height={0.024}
+              rx={0.004}
+              fill="rgba(9, 18, 30, 0.78)"
+              stroke={color}
+              strokeWidth={0.0015}
+            />
+            <circle cx={cx} cy={cy} r={0.006} fill={color} />
             <text
-              x={cx + 0.01}
-              y={cy - 0.012}
-              fontSize="0.022"
+              x={Math.max(0.004, Math.min(0.994, cx + 0.012))}
+              y={Math.max(0.018, cy - 0.016)}
+              fontSize="0.018"
               fontWeight={600}
-              fill="rgba(255, 182, 240, 0.95)"
+              fill="rgba(226, 241, 255, 0.98)"
             >
               {label}
             </text>

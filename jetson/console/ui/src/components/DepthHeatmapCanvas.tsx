@@ -9,7 +9,8 @@ type Props = {
 function colorFor(value: number): string {
   const v = Math.max(0, Math.min(255, value));
   const hue = 220 - (v / 255) * 210;
-  return `hsla(${hue}, 100%, 56%, 0.38)`;
+  const alpha = 0.08 + (v / 255) * 0.22;
+  return `hsla(${hue}, 100%, 56%, ${alpha})`;
 }
 
 export function DepthHeatmapCanvas({ depth, className = "" }: Props): JSX.Element {
@@ -45,7 +46,7 @@ export function DepthHeatmapCanvas({ depth, className = "" }: Props): JSX.Elemen
           continue;
         }
         ctx.fillStyle = colorFor(value);
-        ctx.fillRect(c * cellW, r * cellH, cellW + 1, cellH + 1);
+        ctx.fillRect(c * cellW, r * cellH, cellW + 0.7, cellH + 0.7);
       }
     }
   }, [depth]);
