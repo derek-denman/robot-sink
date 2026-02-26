@@ -28,3 +28,8 @@ node_modules/
 # Editors
 .vscode/
 .idea/
+
+# Toy-vs-shoe perception generated data
+ros_ws/src/perception/toy_shoe_perception/data/raw_bags/
+ros_ws/src/perception/toy_shoe_perception/dataset/
+ros_ws/src/perception/toy_shoe_perception/artifacts/

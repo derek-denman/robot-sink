@@ -1,0 +1,10 @@
+toy_shoe_perception:
+  ros__parameters:
+    model_engine_path: ""
+    confidence_threshold: 0.25
+    iou_threshold: 0.45
+    input_width: 640
+    input_height: 640
+    pickup_zone_xyxy_norm: [0.30, 0.20, 0.95, 0.98]
+    shoe_block_hold_sec: 0.30
+    shoe_block_debounce_hits: 2
