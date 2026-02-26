@@ -40,12 +40,26 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "streaming": {
         "scan_push_hz": 8.0,
         "map_push_hz": 2.0,
+        "obstacle_map_push_hz": 8.0,
         "pointcloud_push_hz": 4.0,
         "depth_push_hz": 6.0,
         "detections_push_hz": 10.0,
         "camera_stream_hz": 12.0,
         "scan_overlay_points": 520,
         "pointcloud_max_points": 4500,
+    },
+    "obstacle_map": {
+        "source_mode": "auto",
+        "resolution_m": 0.05,
+        "window_size_m": 16.0,
+        "max_range_m": 8.0,
+        "compute_hz": 2.0,
+        "scan_max_points": 240,
+        "outlier_threshold_m": 0.4,
+        "inflation_radius_m": 0.35,
+        "decay_time_sec": 2.5,
+        "decay_start_sec": 0.6,
+        "depth_fusion_enabled": False,
     },
     "manual_control": {
         "bank_linear_scale": 0.8,
@@ -64,6 +78,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "topics": {
         "cmd_vel": "/cmd_vel",
         "map": "/map",
+        "costmap": "/local_costmap/costmap",
+        "costmap_topics": ["/local_costmap/costmap", "/global_costmap/costmap"],
         "scan": "/scan",
         "odom": "/odom",
         "tf": "/tf",
@@ -202,6 +218,13 @@ class RobotConsoleApiNode(Node):
         self._map_push_period = 1.0 / map_push_hz
         self._last_map_push_stamp = 0.0
 
+        obstacle_map_push_hz = float(
+            self._config.get("streaming", {}).get("obstacle_map_push_hz", 8.0)
+        )
+        obstacle_map_push_hz = max(0.5, min(20.0, obstacle_map_push_hz))
+        self._obstacle_map_push_period = 1.0 / obstacle_map_push_hz
+        self._last_obstacle_map_push_stamp = 0.0
+
         pointcloud_push_hz = float(self._config.get("streaming", {}).get("pointcloud_push_hz", 4.0))
         pointcloud_push_hz = max(0.5, min(12.0, pointcloud_push_hz))
         self._pointcloud_push_period = 1.0 / pointcloud_push_hz
@@ -221,6 +244,9 @@ class RobotConsoleApiNode(Node):
         self._status_timer = self.create_timer(0.4, self._status_tick)
         self._scan_timer = self.create_timer(self._scan_push_period, self._scan_tick)
         self._map_timer = self.create_timer(self._map_push_period, self._map_tick)
+        self._obstacle_map_timer = self.create_timer(
+            self._obstacle_map_push_period, self._obstacle_map_tick
+        )
         self._pointcloud_timer = self.create_timer(
             self._pointcloud_push_period, self._pointcloud_tick
         )
@@ -291,6 +317,7 @@ class RobotConsoleApiNode(Node):
         depth_status = self.adapters.depth_stream_status()
         detection_status = self.adapters.detection_stream_status()
         map_status = self.adapters.map_stream_status()
+        obstacle_map_status = self.adapters.obstacle_map_stream_status()
         pointcloud_status = self.adapters.pointcloud_stream_status()
         tf_health = self.adapters.tf_health_status()
         topic_catalog = self.adapters.topic_catalog()
@@ -337,6 +364,7 @@ class RobotConsoleApiNode(Node):
                 "depth": depth_status,
                 "detections": detection_status,
                 "map": map_status,
+                "obstacle_map": obstacle_map_status,
                 "pointcloud": pointcloud_status,
                 "tf": tf_health,
                 "topic_catalog": topic_catalog,
@@ -431,6 +459,18 @@ class RobotConsoleApiNode(Node):
         self._last_map_push_stamp = stamp
         self._queue_map_push(payload)
 
+    def _obstacle_map_tick(self) -> None:
+        payload = self.adapters.latest_obstacle_map_snapshot()
+        if not payload:
+            return
+
+        stamp = float(payload.get("stamp_unix", 0.0))
+        if stamp <= 0.0 or stamp <= self._last_obstacle_map_push_stamp:
+            return
+
+        self._last_obstacle_map_push_stamp = stamp
+        self._queue_obstacle_map_push(payload)
+
     def _pointcloud_tick(self) -> None:
         payload = self.adapters.latest_pointcloud_snapshot()
         if not payload:
@@ -494,6 +534,11 @@ class RobotConsoleApiNode(Node):
         if not self._ws_clients:
             return
         self._queue_coro(self.broadcast_event("map_overlay", payload))
+
+    def _queue_obstacle_map_push(self, payload: Dict[str, Any]) -> None:
+        if not self._ws_clients:
+            return
+        self._queue_coro(self.broadcast_event("obstacle_map", payload))
 
     def _queue_pointcloud_push(self, payload: Dict[str, Any]) -> None:
         if not self._ws_clients:
@@ -1385,6 +1430,10 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
         map_payload = node.adapters.latest_map_snapshot()
         if map_payload:
             await ws.send_json({"type": "map", "data": map_payload})
+
+        obstacle_map_payload = node.adapters.latest_obstacle_map_snapshot()
+        if obstacle_map_payload:
+            await ws.send_json({"type": "obstacle_map", "data": obstacle_map_payload})
 
         overlay = node.adapters.map_overlay_snapshot()
         await ws.send_json({"type": "map_overlay", "data": overlay})

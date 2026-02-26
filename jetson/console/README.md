@@ -57,7 +57,15 @@ Built-in visualizer:
   - live rates and message ages for scan/rgb/depth/detections
 - 3-panel Waymo-style layout:
   - **Fused View**: occupancy grid, lidar scan, plan, detection boxes
+    - processed obstacle map layer from backend (`obstacle_map`) with source badge:
+      - preferred: Nav2 costmap topic (when available/fresh)
+      - fallback: computed scan-based local obstacle grid in `robot_console`
+    - explicit pose controls:
+      - `Follow` (default ON)
+      - `Free Pan`
+      - `Recenter` (forces follow + recenter to robot pose)
   - **Top-Down Minimap**: always-on compact BEV with layer legend/toggles
+    - always follows robot pose (no free-pan mode)
   - **OAK-D RGB + Overlays**: RGB stream with detection overlay and optional depth blend
 - Raw Feeds (Debug):
   - OAK RGB raw stream + topic/encoding/frame/rate/age
@@ -66,6 +74,24 @@ Built-in visualizer:
   - if TF is incomplete, rendering stays active in sensor-centric mode
   - warnings are shown instead of blank panels
   - temporary manual extrinsics (laser -> oak-d-base-frame) are available for debug and auto-disabled once TF path exists
+  - TF chain debug overlay toggle + axes triad/frame labels for rapid alignment checks
+
+## Obstacle Map Value Encoding
+
+`obstacle_map` uses compact `rle_u8` encoding with a single 8-bit cost mapping:
+
+- `0`: free
+- `1..252`: inflated/risk cost (higher is less drivable)
+- `253`: occupied/lethal obstacle
+- `255`: unknown
+
+Notes:
+
+- depth fusion remains OFF by default (`obstacle_map.depth_fusion_enabled: false`)
+- drivable wedge overlay in the fused view is a visualization aid only (not a planner guarantee)
+- computed obstacle map perf defaults:
+  - `obstacle_map.compute_hz: 2.0`
+  - `obstacle_map.scan_max_points: 240`
 
 Foxglove (recommended full view):
 

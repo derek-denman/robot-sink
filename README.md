@@ -92,6 +92,8 @@ Robot Console is hosted on the Jetson and served by the `robot_console` ROS back
 - Telemetry WebSocket: `ws://JETSON_IP:8080/ws`
 - Built-in visualizer:
   - 3-panel Waymo-style layout (Fused View, Minimap, OAK-D RGB overlays)
+  - backend-computed/local obstacle map (`obstacle_map`) with Nav2-costmap preference + computed fallback
+  - explicit main-view pose controls: Follow (default), Free Pan, Recenter
   - raw debug feeds for OAK RGB + LiDAR
   - TF-aware fallback rendering (sensor-centric when TF/odom are missing)
   - temporary manual extrinsics UI for debug-only alignment

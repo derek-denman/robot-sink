@@ -12,12 +12,26 @@ safety:
 streaming:
   scan_push_hz: 8.0
   map_push_hz: 2.0
+  obstacle_map_push_hz: 8.0
   pointcloud_push_hz: 4.0
   depth_push_hz: 6.0
   detections_push_hz: 10.0
   camera_stream_hz: 12.0
   scan_overlay_points: 520
   pointcloud_max_points: 4500
+
+obstacle_map:
+  source_mode: auto
+  resolution_m: 0.05
+  window_size_m: 16.0
+  max_range_m: 8.0
+  compute_hz: 2.0
+  scan_max_points: 240
+  outlier_threshold_m: 0.4
+  inflation_radius_m: 0.35
+  decay_time_sec: 2.5
+  decay_start_sec: 0.6
+  depth_fusion_enabled: false
 
 manual_control:
   bank_linear_scale: 0.8
@@ -59,6 +73,10 @@ arm:
 topics:
   cmd_vel: /cmd_vel
   map: /map
+  costmap: /local_costmap/costmap
+  costmap_topics:
+    - /local_costmap/costmap
+    - /global_costmap/costmap
   scan: /scan
   odom: /odom
   tf: /tf

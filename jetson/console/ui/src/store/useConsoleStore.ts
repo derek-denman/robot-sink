@@ -3,6 +3,7 @@ import type {
   DepthPayload,
   DetectionPayload,
   MapOverlayPayload,
+  ObstacleMapPayload,
   MapPayload,
   PointcloudPayload,
   RobotMode,
@@ -41,6 +42,7 @@ type RobotState = {
   status: StatusPayload | null;
   scanPayload: ScanPayload | null;
   mapPayload: MapPayload | null;
+  obstacleMapPayload: ObstacleMapPayload | null;
   mapOverlay: MapOverlayPayload | null;
   pointcloudPayload: PointcloudPayload | null;
   depthPayload: DepthPayload | null;
@@ -65,6 +67,7 @@ type ConsoleStore = {
   setStatus: (status: StatusPayload) => void;
   setScanPayload: (scan: ScanPayload) => void;
   setMapPayload: (map: MapPayload) => void;
+  setObstacleMapPayload: (map: ObstacleMapPayload) => void;
   setMapOverlay: (overlay: MapOverlayPayload) => void;
   setPointcloudPayload: (payload: PointcloudPayload) => void;
   setDepthPayload: (payload: DepthPayload) => void;
@@ -87,6 +90,7 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
     status: null,
     scanPayload: null,
     mapPayload: null,
+    obstacleMapPayload: null,
     mapOverlay: null,
     pointcloudPayload: null,
     depthPayload: null,
@@ -138,6 +142,9 @@ export const useConsoleStore = create<ConsoleStore>((set) => ({
   },
   setMapPayload: (map) => {
     set((state) => ({ robot: { ...state.robot, mapPayload: map } }));
+  },
+  setObstacleMapPayload: (map) => {
+    set((state) => ({ robot: { ...state.robot, obstacleMapPayload: map } }));
   },
   setMapOverlay: (overlay) => {
     set((state) => ({ robot: { ...state.robot, mapOverlay: overlay } }));

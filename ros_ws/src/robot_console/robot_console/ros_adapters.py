@@ -96,6 +96,7 @@ class RosAdapters:
         self._scan_topic = str(topics.get("scan", "/scan")).strip() or "/scan"
         self._odom_topic = str(topics.get("odom", "/odom")).strip() or "/odom"
         self._map_topic = str(topics.get("map", "/map")).strip() or "/map"
+        self._costmap_topic = str(topics.get("costmap", "/local_costmap/costmap")).strip() or "/local_costmap/costmap"
         self._map_frame = str(topics.get("map_frame", "map")).strip().strip("/") or "map"
         self._base_frame = str(topics.get("base_frame", "base_link")).strip().strip("/") or "base_link"
         self._rgb_topic = str(
@@ -123,6 +124,44 @@ class RosAdapters:
         self._pointcloud_topic = str(topics.get("pointcloud", "")).strip()
         self._pointcloud_max_points = int(config.get("streaming", {}).get("pointcloud_max_points", 4500))
         self._scan_overlay_points = int(config.get("streaming", {}).get("scan_overlay_points", 520))
+        obstacle_cfg = config.get("obstacle_map", {})
+        self._obstacle_source_mode = str(obstacle_cfg.get("source_mode", "auto")).strip().lower() or "auto"
+        self._obstacle_resolution = max(0.02, min(0.25, float(obstacle_cfg.get("resolution_m", 0.05))))
+        self._obstacle_window_m = max(4.0, min(30.0, float(obstacle_cfg.get("window_size_m", 16.0))))
+        self._obstacle_max_range_m = max(1.0, min(30.0, float(obstacle_cfg.get("max_range_m", 8.0))))
+        self._obstacle_outlier_threshold_m = max(
+            0.05, min(2.0, float(obstacle_cfg.get("outlier_threshold_m", 0.4)))
+        )
+        self._obstacle_inflation_radius_m = max(
+            0.0, min(3.0, float(obstacle_cfg.get("inflation_radius_m", 0.35)))
+        )
+        self._obstacle_decay_time_sec = max(
+            0.5, min(20.0, float(obstacle_cfg.get("decay_time_sec", 2.5)))
+        )
+        self._obstacle_decay_start_sec = max(
+            0.0, min(10.0, float(obstacle_cfg.get("decay_start_sec", 0.6)))
+        )
+        self._obstacle_depth_fusion_enabled = bool(obstacle_cfg.get("depth_fusion_enabled", False))
+        self._obstacle_compute_hz = max(1.0, min(20.0, float(obstacle_cfg.get("compute_hz", 2.0))))
+        self._obstacle_compute_period = 1.0 / self._obstacle_compute_hz
+        self._last_obstacle_compute_unix = 0.0
+        self._obstacle_scan_max_points = int(obstacle_cfg.get("scan_max_points", 240))
+        self._obstacle_scan_max_points = max(120, min(1200, self._obstacle_scan_max_points))
+        self._obstacle_free_value = 0
+        self._obstacle_occupied_value = 253
+        self._obstacle_unknown_value = 255
+        self._obstacle_inflation_min = 1
+        self._obstacle_inflation_max = 252
+        self._obstacle_width = max(64, int(round(self._obstacle_window_m / self._obstacle_resolution)))
+        self._obstacle_height = self._obstacle_width
+        self._obstacle_cell_count = self._obstacle_width * self._obstacle_height
+        self._obstacle_cells: List[int] = [self._obstacle_unknown_value for _ in range(self._obstacle_cell_count)]
+        self._obstacle_last_seen: List[float] = [0.0 for _ in range(self._obstacle_cell_count)]
+        self._obstacle_origin = {"x": -self._obstacle_window_m * 0.5, "y": -self._obstacle_window_m * 0.5, "yaw": 0.0}
+        configured_costmap_topics = topics.get("costmap_topics", []) or []
+        self._costmap_topics = self._unique_topics(
+            [self._costmap_topic, "/local_costmap/costmap", "/global_costmap/costmap"] + list(configured_costmap_topics)
+        )
 
         self._scan_sub: Any = None
         self.ensure_scan_subscription(self._scan_topic)
@@ -135,6 +174,8 @@ class RosAdapters:
         )
         self._map_sub = None
         self._set_map_subscription(self._map_topic)
+        self._costmap_sub: Any = None
+        self.ensure_costmap_subscription(self._costmap_topic)
         self._tf_sub = node.create_subscription(TFMessage, self._tf_topic, self._on_tf, 30)
         self._tf_static_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -227,6 +268,10 @@ class RosAdapters:
         self._latest_scan_payload: Optional[Dict[str, Any]] = None
         self._map_payload_lock = threading.Lock()
         self._latest_map_payload: Optional[Dict[str, Any]] = None
+        self._obstacle_payload_lock = threading.Lock()
+        self._latest_obstacle_payload: Optional[Dict[str, Any]] = None
+        self._latest_nav2_obstacle_payload: Optional[Dict[str, Any]] = None
+        self._latest_computed_obstacle_payload: Optional[Dict[str, Any]] = None
         self._camera_raw_lock = threading.Lock()
         self._camera_raw_state: Dict[str, Dict[str, Any]] = {}
         self._latest_camera_info_lock = threading.Lock()
@@ -424,6 +469,29 @@ class RosAdapters:
             self._map_qos,
         )
 
+    def ensure_costmap_subscription(self, topic_name: str) -> Dict[str, Any]:
+        topic_name = (topic_name or "").strip()
+        if not topic_name:
+            return {"ok": False, "error": "missing_topic"}
+        if self._costmap_sub is not None and self._costmap_topic == topic_name:
+            return {"ok": True, "topic": topic_name}
+
+        if self._costmap_sub is not None:
+            with contextlib.suppress(Exception):
+                self._node.destroy_subscription(self._costmap_sub)
+            self._costmap_sub = None
+
+        self._costmap_sub = self._node.create_subscription(
+            OccupancyGrid,
+            topic_name,
+            self._on_costmap,
+            self._map_qos,
+        )
+        self._costmap_topic = topic_name
+        if topic_name not in self._costmap_topics:
+            self._costmap_topics.append(topic_name)
+        return {"ok": True, "topic": topic_name}
+
     def _make_path_callback(self, topic_name: str) -> Callable[[Path], None]:
         key = f"path:{topic_name}"
 
@@ -484,6 +552,10 @@ class RosAdapters:
         payload = self._build_scan_payload(msg)
         with self._scan_payload_lock:
             self._latest_scan_payload = payload
+        now = time.time()
+        if (now - self._last_obstacle_compute_unix) >= self._obstacle_compute_period:
+            self._last_obstacle_compute_unix = now
+            self._update_obstacle_map_from_scan(msg)
 
     def _build_scan_payload(self, msg: LaserScan, max_points: int = 360) -> Dict[str, Any]:
         count = len(msg.ranges)
@@ -536,6 +608,18 @@ class RosAdapters:
         payload = self._build_map_payload(msg)
         with self._map_payload_lock:
             self._latest_map_payload = payload
+
+    def _on_costmap(self, msg: OccupancyGrid) -> None:
+        self._mark_topic("costmap")
+        self._mark_topic("obstacle_map")
+        if self._costmap_topic:
+            self._mark_topic(f"costmap:{self._costmap_topic}")
+            self._mark_topic(f"obstacle_map:{self._costmap_topic}")
+        payload = self._build_nav2_obstacle_payload(msg, self._costmap_topic or msg.header.frame_id)
+        with self._obstacle_payload_lock:
+            self._latest_nav2_obstacle_payload = payload
+            if self._obstacle_source_mode in {"auto", "nav2"}:
+                self._latest_obstacle_payload = payload
 
     def _on_pointcloud(self, msg: PointCloud2) -> None:
         self._mark_topic("pointcloud")
@@ -616,6 +700,43 @@ class RosAdapters:
         out.append([run_val, run_count])
         return out
 
+    @staticmethod
+    def _encode_u8_rle(values: Sequence[int]) -> List[List[int]]:
+        if not values:
+            return []
+        out: List[List[int]] = []
+        run_val = max(0, min(255, int(values[0])))
+        run_count = 1
+        for raw in values[1:]:
+            value = max(0, min(255, int(raw)))
+            if value == run_val and run_count < 65535:
+                run_count += 1
+                continue
+            out.append([run_val, run_count])
+            run_val = value
+            run_count = 1
+        out.append([run_val, run_count])
+        return out
+
+    def _obstacle_value_mapping(self) -> Dict[str, int]:
+        return {
+            "free": self._obstacle_free_value,
+            "occupied": self._obstacle_occupied_value,
+            "unknown": self._obstacle_unknown_value,
+            "inflation_min": self._obstacle_inflation_min,
+            "inflation_max": self._obstacle_inflation_max,
+        }
+
+    def _nav_cost_to_u8(self, value: int) -> int:
+        if value < 0:
+            return self._obstacle_unknown_value
+        if value == 0:
+            return self._obstacle_free_value
+        if value >= 100:
+            return self._obstacle_occupied_value
+        scaled = int(round((float(value) / 100.0) * self._obstacle_occupied_value))
+        return max(self._obstacle_inflation_min, min(self._obstacle_occupied_value, scaled))
+
     def _build_map_payload(self, msg: OccupancyGrid) -> Dict[str, Any]:
         origin = msg.info.origin
         yaw = self._quat_to_yaw(
@@ -641,6 +762,36 @@ class RosAdapters:
             "data_rle": rle,
         }
 
+    def _build_nav2_obstacle_payload(self, msg: OccupancyGrid, topic_name: str) -> Dict[str, Any]:
+        origin = msg.info.origin
+        yaw = self._quat_to_yaw(
+            float(origin.orientation.x),
+            float(origin.orientation.y),
+            float(origin.orientation.z),
+            float(origin.orientation.w),
+        )
+        values = [self._nav_cost_to_u8(int(raw)) for raw in msg.data]
+        return {
+            "stamp_unix": time.time(),
+            "topic": topic_name,
+            "source": "nav2",
+            "frame_id": msg.header.frame_id or self._map_frame,
+            "width": int(msg.info.width),
+            "height": int(msg.info.height),
+            "resolution": float(msg.info.resolution),
+            "origin": {
+                "x": float(origin.position.x),
+                "y": float(origin.position.y),
+                "yaw": yaw,
+            },
+            "encoding": "rle_u8",
+            "cell_count": len(values),
+            "data_rle": self._encode_u8_rle(values),
+            "value_mapping": self._obstacle_value_mapping(),
+            "depth_fusion_enabled": self._obstacle_depth_fusion_enabled,
+            "warnings": [],
+        }
+
     def _build_path_payload(self, topic_name: str, msg: Path, max_points: int = 1200) -> Dict[str, Any]:
         points: List[List[float]] = []
         total = len(msg.poses)
@@ -660,6 +811,266 @@ class RosAdapters:
             "point_count": len(points),
             "points": points,
         }
+
+    @staticmethod
+    def _median3(a: float, b: float, c: float) -> float:
+        vals = [a, b, c]
+        vals.sort()
+        return vals[1]
+
+    def _scan_points_for_obstacle(self, msg: LaserScan) -> List[List[float]]:
+        points: List[List[float]] = []
+        values = list(msg.ranges)
+        if not values:
+            return points
+
+        max_range = min(float(msg.range_max), self._obstacle_max_range_m)
+        step = max(1, len(values) // max(1, self._obstacle_scan_max_points))
+        angle = float(msg.angle_min)
+        for idx, raw in enumerate(values):
+            if idx % step != 0:
+                angle += float(msg.angle_increment)
+                continue
+            r = float(raw)
+            valid = math.isfinite(r) and (r >= float(msg.range_min)) and (r <= max_range)
+            if not valid:
+                angle += float(msg.angle_increment)
+                continue
+
+            if idx > 0 and idx < len(values) - 1:
+                prev = float(values[idx - 1])
+                nxt = float(values[idx + 1])
+                neighbors_ok = (
+                    math.isfinite(prev)
+                    and math.isfinite(nxt)
+                    and prev >= float(msg.range_min)
+                    and nxt >= float(msg.range_min)
+                )
+                if neighbors_ok:
+                    med = self._median3(prev, r, nxt)
+                    if abs(r - med) > self._obstacle_outlier_threshold_m:
+                        angle += float(msg.angle_increment)
+                        continue
+
+            points.append([math.cos(angle) * r, math.sin(angle) * r])
+            angle += float(msg.angle_increment)
+
+        return points
+
+    def _transform_scan_points(
+        self,
+        target_frame: str,
+        source_frame: str,
+        points: Sequence[Sequence[float]],
+    ) -> tuple[List[List[float]], tuple[float, float], bool]:
+        source_frame = (source_frame or "").strip("/")
+        target_frame = (target_frame or "").strip("/")
+        if not source_frame or not target_frame:
+            return [[float(p[0]), float(p[1])] for p in points if len(p) >= 2], (0.0, 0.0), False
+        if source_frame == target_frame:
+            return [[float(p[0]), float(p[1])] for p in points if len(p) >= 2], (0.0, 0.0), True
+
+        tf = self.lookup_transform(target_frame, source_frame)
+        if tf is None:
+            return [[float(p[0]), float(p[1])] for p in points if len(p) >= 2], (0.0, 0.0), False
+
+        yaw = float(tf.get("yaw", 0.0))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        tx = float(tf.get("x", 0.0))
+        ty = float(tf.get("y", 0.0))
+        transformed: List[List[float]] = []
+        for point in points:
+            if len(point) < 2:
+                continue
+            x = float(point[0])
+            y = float(point[1])
+            transformed.append([tx + cos_yaw * x - sin_yaw * y, ty + sin_yaw * x + cos_yaw * y])
+        return transformed, (tx, ty), True
+
+    def _cell_of(
+        self,
+        x: float,
+        y: float,
+        origin_x: float,
+        origin_y: float,
+    ) -> tuple[int, int]:
+        col = int((x - origin_x) / self._obstacle_resolution)
+        row = int((y - origin_y) / self._obstacle_resolution)
+        return row, col
+
+    def _cell_index(self, row: int, col: int) -> int:
+        if row < 0 or col < 0 or row >= self._obstacle_height or col >= self._obstacle_width:
+            return -1
+        return row * self._obstacle_width + col
+
+    def _ray_cells(self, row0: int, col0: int, row1: int, col1: int) -> List[tuple[int, int]]:
+        cells: List[tuple[int, int]] = []
+        dr = abs(row1 - row0)
+        dc = abs(col1 - col0)
+        sr = 1 if row0 < row1 else -1
+        sc = 1 if col0 < col1 else -1
+        err = dc - dr
+        row = row0
+        col = col0
+        while True:
+            cells.append((row, col))
+            if row == row1 and col == col1:
+                break
+            e2 = 2 * err
+            if e2 > -dr:
+                err -= dr
+                col += sc
+            if e2 < dc:
+                err += dc
+                row += sr
+            if len(cells) > (self._obstacle_width + self._obstacle_height):
+                break
+        return cells
+
+    def _inflate_obstacle_cells(self, observed: List[int], occupied_indices: Sequence[int]) -> None:
+        radius_cells = int(round(self._obstacle_inflation_radius_m / self._obstacle_resolution))
+        if radius_cells <= 0:
+            return
+        offsets: List[tuple[int, int, float]] = []
+        for dr in range(-radius_cells, radius_cells + 1):
+            for dc in range(-radius_cells, radius_cells + 1):
+                dist = math.hypot(float(dr), float(dc))
+                if dist > radius_cells:
+                    continue
+                offsets.append((dr, dc, dist))
+
+        for index in occupied_indices:
+            row = index // self._obstacle_width
+            col = index % self._obstacle_width
+            for dr, dc, dist in offsets:
+                nr = row + dr
+                nc = col + dc
+                nidx = self._cell_index(nr, nc)
+                if nidx < 0:
+                    continue
+                if observed[nidx] == self._obstacle_occupied_value:
+                    continue
+                ratio = 1.0 - (dist / max(1.0, float(radius_cells)))
+                if ratio <= 0.0:
+                    continue
+                cost = int(
+                    round(
+                        self._obstacle_inflation_min
+                        + ratio * (self._obstacle_inflation_max - self._obstacle_inflation_min)
+                    )
+                )
+                current = observed[nidx]
+                if current == self._obstacle_unknown_value or cost > current:
+                    observed[nidx] = max(self._obstacle_inflation_min, min(self._obstacle_inflation_max, cost))
+
+    def _build_computed_obstacle_payload(self, msg: LaserScan) -> Dict[str, Any]:
+        now = time.time()
+        warnings: List[str] = []
+        fixed_frame, fixed_warnings = self._resolve_fixed_frame()
+        warnings.extend(fixed_warnings)
+        scan_frame = (msg.header.frame_id or "").strip("/")
+        sensor_points = self._scan_points_for_obstacle(msg)
+        points, sensor_origin, resolved = self._transform_scan_points(fixed_frame, scan_frame, sensor_points)
+
+        frame_id = fixed_frame if resolved else (scan_frame or "sensor")
+        if sensor_points and not resolved:
+            warnings.append(f"Missing TF: cannot transform {scan_frame or 'scan'} to {fixed_frame}")
+
+        center_x = sensor_origin[0]
+        center_y = sensor_origin[1]
+        pose = self.robot_pose_in_frame(frame_id)
+        if pose is not None:
+            center_x = float(pose.get("x", center_x))
+            center_y = float(pose.get("y", center_y))
+
+        origin_x = center_x - (self._obstacle_width * self._obstacle_resolution) * 0.5
+        origin_y = center_y - (self._obstacle_height * self._obstacle_resolution) * 0.5
+        self._obstacle_origin = {"x": origin_x, "y": origin_y, "yaw": 0.0}
+
+        observed = [self._obstacle_unknown_value for _ in range(self._obstacle_cell_count)]
+        occupied_indices: List[int] = []
+
+        sensor_row, sensor_col = self._cell_of(sensor_origin[0], sensor_origin[1], origin_x, origin_y)
+        for point in points:
+            px = float(point[0])
+            py = float(point[1])
+            end_row, end_col = self._cell_of(px, py, origin_x, origin_y)
+            end_idx = self._cell_index(end_row, end_col)
+            if end_idx < 0:
+                continue
+            ray = self._ray_cells(sensor_row, sensor_col, end_row, end_col)
+            for rr, cc in ray[:-1]:
+                idx = self._cell_index(rr, cc)
+                if idx < 0:
+                    continue
+                observed[idx] = self._obstacle_free_value
+
+            observed[end_idx] = self._obstacle_occupied_value
+            occupied_indices.append(end_idx)
+
+        self._inflate_obstacle_cells(observed, occupied_indices)
+
+        for idx, value in enumerate(observed):
+            if value != self._obstacle_unknown_value:
+                self._obstacle_cells[idx] = value
+                self._obstacle_last_seen[idx] = now
+                continue
+
+            age = now - float(self._obstacle_last_seen[idx])
+            if age > self._obstacle_decay_time_sec:
+                self._obstacle_cells[idx] = self._obstacle_unknown_value
+                continue
+            if age > self._obstacle_decay_start_sec:
+                current = self._obstacle_cells[idx]
+                if current == self._obstacle_unknown_value:
+                    continue
+                if current <= self._obstacle_free_value:
+                    continue
+                if current < self._obstacle_occupied_value:
+                    self._obstacle_cells[idx] = max(
+                        self._obstacle_free_value,
+                        int(round(current * 0.88)),
+                    )
+
+        return {
+            "stamp_unix": now,
+            "topic": self._costmap_topic,
+            "source": "computed",
+            "frame_id": frame_id,
+            "width": self._obstacle_width,
+            "height": self._obstacle_height,
+            "resolution": self._obstacle_resolution,
+            "origin": dict(self._obstacle_origin),
+            "encoding": "rle_u8",
+            "cell_count": self._obstacle_cell_count,
+            "data_rle": self._encode_u8_rle(self._obstacle_cells),
+            "value_mapping": self._obstacle_value_mapping(),
+            "depth_fusion_enabled": self._obstacle_depth_fusion_enabled,
+            "warnings": warnings,
+        }
+
+    def _update_obstacle_map_from_scan(self, msg: LaserScan) -> None:
+        self._mark_topic("obstacle_map")
+        if self._costmap_topic:
+            self._mark_topic(f"obstacle_map:{self._costmap_topic}")
+        computed = self._build_computed_obstacle_payload(msg)
+        with self._obstacle_payload_lock:
+            self._latest_computed_obstacle_payload = computed
+            nav2_payload = self._latest_nav2_obstacle_payload
+
+            nav2_age = None
+            if nav2_payload is not None:
+                nav2_age = max(0.0, time.time() - float(nav2_payload.get("stamp_unix", 0.0)))
+            nav2_fresh = nav2_payload is not None and nav2_age is not None and nav2_age < 1.5
+
+            use_nav2 = self._obstacle_source_mode == "nav2" or (
+                self._obstacle_source_mode == "auto" and nav2_fresh
+            )
+            if use_nav2 and nav2_payload is not None:
+                self._latest_obstacle_payload = json.loads(json.dumps(nav2_payload))
+            else:
+                self._latest_obstacle_payload = json.loads(json.dumps(computed))
 
     def _build_pointcloud_payload(self, msg: PointCloud2, topic_name: str) -> Dict[str, Any]:
         total = int(msg.width) * int(msg.height)
@@ -1177,12 +1588,20 @@ class RosAdapters:
             missing_pairs.append(f"{det_frame}->{fixed_frame}")
 
         has_base_link = self._base_frame in set(self.available_frames())
+        has_map_odom = self.lookup_transform("map", "odom") is not None or self._map_frame == "odom"
         has_odom_base = self.lookup_transform("odom", self._base_frame) is not None
         has_base_laser = bool(scan_frame and self.lookup_transform(self._base_frame, scan_frame))
         has_base_oak = self.lookup_transform(self._base_frame, "oak-d-base-frame") is not None
         has_base_oak = has_base_oak or self.lookup_transform(
             self._base_frame, "oak_rgb_camera_optical_frame"
         ) is not None
+
+        if not has_odom_base:
+            missing_pairs.append(f"odom->{self._base_frame}")
+        if scan_frame and not has_base_laser:
+            missing_pairs.append(f"{self._base_frame}->{scan_frame}")
+        if not has_base_oak:
+            missing_pairs.append(f"{self._base_frame}->oak-d-base-frame")
 
         return {
             "tf_age_sec": self.topic_age_sec("tf"),
@@ -1191,6 +1610,7 @@ class RosAdapters:
             "scan_to_fixed_ok": scan_ok,
             "detections_to_fixed_ok": det_ok,
             "missing_pairs": missing_pairs,
+            "has_map_odom_tf": has_map_odom,
             "has_base_link": has_base_link,
             "has_odom_base_tf": has_odom_base,
             "has_base_laser_tf": has_base_laser,
@@ -1320,6 +1740,8 @@ class RosAdapters:
             "tf",
             "tf_static",
             "map",
+            "costmap",
+            "obstacle_map",
             "path",
             "pointcloud",
         ]
@@ -1342,6 +1764,11 @@ class RosAdapters:
         for topic in self.path_topics():
             key = f"path:{topic}"
             rates[key] = self._rate[key].hz()
+
+        for topic in self.costmap_topics():
+            key = f"costmap:{topic}"
+            rates[key] = self._rate[key].hz()
+            rates[f"obstacle_map:{topic}"] = self._rate[f"obstacle_map:{topic}"].hz()
 
         for topic in self.pointcloud_topics():
             key = f"pointcloud:{topic}"
@@ -1553,6 +1980,12 @@ class RosAdapters:
                 return None
             return json.loads(json.dumps(self._latest_map_payload))
 
+    def latest_obstacle_map_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._obstacle_payload_lock:
+            if self._latest_obstacle_payload is None:
+                return None
+            return json.loads(json.dumps(self._latest_obstacle_payload))
+
     def latest_pointcloud_snapshot(self) -> Optional[Dict[str, Any]]:
         with self._pointcloud_payload_lock:
             if self._latest_pointcloud_payload is None:
@@ -1600,10 +2033,12 @@ class RosAdapters:
         map_topics = self._discover_topics("nav_msgs/msg/OccupancyGrid")
         scan_topics = self._discover_topics("sensor_msgs/msg/LaserScan")
         path_topics = self.path_topics()
+        costmap_topics = self.costmap_topics()
         fixed_state = self.fixed_frame_state()
         return {
             "selected": {
                 "map_topic": self._map_topic,
+                "costmap_topic": self._costmap_topic,
                 "scan_topic": self._scan_topic,
                 "path_topic": self._selected_path_topic,
                 "map_frame": self._map_frame,
@@ -1613,10 +2048,41 @@ class RosAdapters:
             },
             "available": {
                 "map_topics": map_topics,
+                "costmap_topics": costmap_topics,
                 "scan_topics": scan_topics,
                 "path_topics": path_topics,
                 "fixed_frames": fixed_state.get("options", []),
             },
+        }
+
+    def costmap_topics(self) -> List[str]:
+        discovered = self._discover_topics("nav_msgs/msg/OccupancyGrid")
+        candidates = [topic for topic in discovered if "costmap" in topic.lower()]
+        candidates.extend(self._costmap_topics)
+        combined = self._unique_topics(candidates)
+        return sorted([topic for topic in combined if topic])
+
+    def obstacle_map_stream_status(self) -> Dict[str, Any]:
+        rates = self.topic_rates()
+        payload = self.latest_obstacle_map_snapshot()
+        age = self.topic_age_sec("obstacle_map")
+        topic = str((payload or {}).get("topic", self._costmap_topic))
+        topic_key = f"obstacle_map:{topic}" if topic else "obstacle_map"
+        return {
+            "selected_topic": self._costmap_topic,
+            "available_topics": self.costmap_topics(),
+            "source": (payload or {}).get("source", "none"),
+            "fps": rates.get(topic_key, rates.get("obstacle_map", 0.0)),
+            "age_sec": age,
+            "connected": payload is not None and age is not None and age < 2.5,
+            "frame_id": (payload or {}).get("frame_id", ""),
+            "width": (payload or {}).get("width", 0),
+            "height": (payload or {}).get("height", 0),
+            "resolution": (payload or {}).get("resolution", 0.0),
+            "publisher_count": self._publisher_count(self._costmap_topic),
+            "depth_fusion_enabled": bool((payload or {}).get("depth_fusion_enabled", False)),
+            "value_mapping": (payload or {}).get("value_mapping", self._obstacle_value_mapping()),
+            "warnings": (payload or {}).get("warnings", []),
         }
 
     def configure_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1626,6 +2092,13 @@ class RosAdapters:
         if map_topic and map_topic != self._map_topic:
             self._set_map_subscription(map_topic)
             changed["map_topic"] = map_topic
+
+        costmap_topic = str(payload.get("costmap_topic", "")).strip()
+        if costmap_topic and costmap_topic != self._costmap_topic:
+            result = self.ensure_costmap_subscription(costmap_topic)
+            if not result.get("ok", False):
+                return result
+            changed["costmap_topic"] = costmap_topic
 
         path_topic = str(payload.get("path_topic", "")).strip()
         if path_topic:
@@ -1674,6 +2147,20 @@ class RosAdapters:
             }
         path = self.selected_path_payload()
         warnings = list(frame_warnings)
+        wedge_points: List[List[float]] = []
+        if pose:
+            px = float(pose.get("x", 0.0))
+            py = float(pose.get("y", 0.0))
+            pyaw = float(pose.get("yaw", 0.0))
+            steps = 24
+            radius = 4.2
+            half_fov = 0.62
+            wedge_points.append([round(px, 4), round(py, 4)])
+            for idx in range(steps + 1):
+                offset = -half_fov + (idx / steps) * half_fov * 2.0
+                wx = px + math.cos(pyaw + offset) * radius
+                wy = py + math.sin(pyaw + offset) * radius
+                wedge_points.append([round(wx, 4), round(wy, 4)])
         scan_points_sensor = list(scan.get("points", []))
         scan_frame = str(scan.get("frame_id", "")).strip("/")
         scan_points_fixed, scan_resolved = self._scan_points_in_frame(
@@ -1752,6 +2239,7 @@ class RosAdapters:
             if isinstance(detections, dict)
             else False,
             "detections": detection_bev,
+            "drivable_wedge": wedge_points,
             "warnings": warnings,
             "tf_age_sec": self.topic_age_sec("tf"),
         }
@@ -1970,6 +2458,16 @@ class RosAdapters:
                     defaults=["/map"],
                 ),
             },
+            "costmap": {
+                "selected_topic": self._costmap_topic,
+                "options": [
+                    {
+                        "topic": topic,
+                        "publisher_count": self._publisher_count(topic),
+                    }
+                    for topic in self.costmap_topics()
+                ],
+            },
             "pointcloud": {
                 "selected_topic": self._pointcloud_topic,
                 "options": self._topic_options(
@@ -2051,6 +2549,13 @@ class RosAdapters:
         if map_topic and map_topic != self._map_topic:
             self._set_map_subscription(map_topic)
             changed["map_topic"] = map_topic
+
+        costmap_topic = str(payload.get("costmap_topic", "")).strip()
+        if costmap_topic and costmap_topic != self._costmap_topic:
+            result = self.ensure_costmap_subscription(costmap_topic)
+            if not result.get("ok", False):
+                return result
+            changed["costmap_topic"] = costmap_topic
 
         path_topic = str(payload.get("path_topic", "")).strip()
         if path_topic and path_topic != self._selected_path_topic:

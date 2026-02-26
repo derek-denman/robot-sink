@@ -53,6 +53,35 @@ export type MapPayload = {
   data_rle: Array<[number, number]>;
 };
 
+export type ObstacleValueMapping = {
+  free: number;
+  occupied: number;
+  unknown: number;
+  inflation_min: number;
+  inflation_max: number;
+};
+
+export type ObstacleMapPayload = {
+  stamp_unix: number;
+  topic: string;
+  source: "nav2" | "computed" | "none";
+  frame_id: string;
+  width: number;
+  height: number;
+  resolution: number;
+  origin: {
+    x: number;
+    y: number;
+    yaw: number;
+  };
+  encoding: "rle_u8" | string;
+  cell_count: number;
+  data_rle: Array<[number, number]>;
+  value_mapping: ObstacleValueMapping;
+  depth_fusion_enabled: boolean;
+  warnings: string[];
+};
+
 export type DetectionBev = {
   id: string;
   class_id: string;
@@ -150,6 +179,7 @@ export type MapOverlayPayload = {
   detection_count?: number;
   detection_resolved?: boolean;
   detections?: DetectionBev[];
+  drivable_wedge?: Array<ScanPoint>;
   warnings?: string[];
   tf_age_sec: number | null;
 };
@@ -236,6 +266,23 @@ export type MapStreamStatus = {
   path_rate_hz: number;
 };
 
+export type ObstacleMapStreamStatus = {
+  selected_topic: string;
+  available_topics: string[];
+  source: "nav2" | "computed" | "none";
+  fps: number;
+  age_sec: number | null;
+  connected: boolean;
+  frame_id: string;
+  width: number;
+  height: number;
+  resolution: number;
+  publisher_count: number;
+  depth_fusion_enabled: boolean;
+  value_mapping: ObstacleValueMapping;
+  warnings: string[];
+};
+
 export type PointcloudStreamStatus = {
   selected_topic: string;
   available_topics: string[];
@@ -315,6 +362,7 @@ export type TopicCatalog = {
   depth: { selected_topic: string; options: TopicOption[] };
   detections: { selected_topic: string; options: TopicOption[] };
   map: { selected_topic: string; options: TopicOption[] };
+  costmap: { selected_topic: string; options: TopicOption[] };
   pointcloud: { selected_topic: string; options: TopicOption[] };
   plans: { selected_topic: string; options: TopicOption[] };
   fixed_frame: FixedFrameState;
@@ -416,6 +464,7 @@ export type StatusPayload = {
     depth: DepthStreamStatus;
     detections: DetectionStreamStatus;
     map: MapStreamStatus;
+    obstacle_map: ObstacleMapStreamStatus;
     pointcloud: PointcloudStreamStatus;
     tf: TfHealthStatus;
     topic_catalog: TopicCatalog;
@@ -447,6 +496,7 @@ export type WsEvent =
   | { type: "status"; data: StatusPayload }
   | { type: "scan"; data: ScanPayload }
   | { type: "map"; data: MapPayload }
+  | { type: "obstacle_map"; data: ObstacleMapPayload }
   | { type: "map_overlay"; data: MapOverlayPayload }
   | { type: "pointcloud"; data: PointcloudPayload }
   | { type: "depth"; data: DepthPayload }
