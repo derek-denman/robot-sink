@@ -1,10 +1,26 @@
-toy_shoe_perception:
+toy_shoe_trt_detector:
   ros__parameters:
     model_engine_path: ""
+    image_topic: "/oak/rgb/image_raw/compressed"
+    input_compressed: true
+    detections_topic: "/perception/detections_2d"
     confidence_threshold: 0.25
     iou_threshold: 0.45
+    imgsz: 640
+    max_det: 100
+    device: ""
+    frame_id_override: ""
+
+toy_shoe_safety_gate:
+  ros__parameters:
+    detections_topic: "/perception/detections_2d"
+    toy_candidates_topic: "/perception/toy_candidates"
+    shoe_blocked_topic: "/perception/shoe_blocked"
     input_width: 640
     input_height: 640
     pickup_zone_xyxy_norm: [0.30, 0.20, 0.95, 0.98]
+    toy_class_name: "toy"
+    shoe_class_name: "shoe"
+    min_score: 0.0
     shoe_block_hold_sec: 0.30
     shoe_block_debounce_hits: 2

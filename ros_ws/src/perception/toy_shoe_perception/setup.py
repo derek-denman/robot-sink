@@ -24,6 +24,9 @@ setup(
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
-        "console_scripts": [],
+        "console_scripts": [
+            "trt_detector_node = toy_shoe_perception.trt_detector_node:main",
+            "safety_gate_node = toy_shoe_perception.safety_gate_node:main",
+        ],
     },
 )
