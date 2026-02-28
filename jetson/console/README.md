@@ -130,6 +130,16 @@ The visualizer can run with partial TF, but accurate moving-map alignment requir
 
 Config file: `ros_ws/src/base_bringup/config/base_bringup.yaml`
 
+If you start the stack with `./jetson/scripts/run_stack.sh`, do not separately launch
+`ros2 launch base_bringup base_tf.launch.py` unless stack-managed base TF startup is disabled.
+Use this check when heading appears to bounce:
+
+```bash
+pgrep -af "base_tf.launch.py|bbb_odom_tf_bridge|base_bringup"
+```
+
+Expected: only one effective `base_bringup`/`bbb_odom_tf_bridge` publisher path.
+
 ### Verification commands
 
 ```bash

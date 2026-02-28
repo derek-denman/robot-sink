@@ -12,9 +12,22 @@ cd ~/robot-sink
 Default behavior:
 
 - Attempts BB USB networking setup (continues on failure for bench use)
-- Starts `foxglove_bridge`, `robot_console`, OAK-D, RPLIDAR, RoArm stub, task stub, and BB bridge
+- Starts `foxglove_bridge`, `robot_console`, OAK-D, RPLIDAR, RoArm stub, task stub, and base TF bringup when `base_bringup` is installed (otherwise BB bridge fallback)
 - Uses real ROS nodes when installed; falls back to stubs where needed
 - Writes logs under `jetson/logs/`
+
+### Base TF ownership
+
+`run_stack.sh` owns startup of `ros2 launch base_bringup base_tf.launch.py` when `base_bringup` is installed.
+Do not also launch `base_tf.launch.py` manually unless base TF startup has been disabled in the stack.
+
+If robot heading flips/bounces in the fused view, check for duplicates:
+
+```bash
+pgrep -af "base_tf.launch.py|bbb_odom_tf_bridge|base_bringup"
+```
+
+Expected: only one effective `base_bringup`/`bbb_odom_tf_bridge` publisher path.
 
 ## Robot Console Quick Start
 

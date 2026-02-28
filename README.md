@@ -119,11 +119,22 @@ Sensor placement prerequisites are in `jetson/docs/05_usb_devices_and_udev.md`.
 - `bbb_odom_tf_bridge`: polls BBB `/api/status`, publishes `/odom` and TF `odom->base_link`
 - static TF launch for `base_link->laser` and `base_link->oak-d-base-frame`
 
-Run:
+If `base_bringup` is installed, `./jetson/scripts/run_stack.sh` already launches `base_tf.launch.py`.
+Do not manually launch `base_tf.launch.py` at the same time unless base TF launch is disabled in `run_stack.sh`.
+
+Manual launch (only when not using `run_stack.sh` for base TF):
 
 ```bash
 ros2 launch base_bringup base_tf.launch.py
 ```
+
+Troubleshooting heading flip / TF bounce:
+
+```bash
+pgrep -af "base_tf.launch.py|bbb_odom_tf_bridge|base_bringup"
+```
+
+Expected: only one effective `base_bringup`/`bbb_odom_tf_bridge` publisher path for `odom->base_link`.
 
 Configure via:
 
