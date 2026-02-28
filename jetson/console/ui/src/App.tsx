@@ -1831,143 +1831,137 @@ export default function App(): JSX.Element {
 
     return (
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
-        <Row gutter={[16, 16]}>
-          <Col xs={24} xl={14}>
-            <Card title="Training + Data Capture" className="hmi-card">
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <Text>Run guided capture by target image count, or set an explicit duration override.</Text>
-                <Space.Compact style={{ width: "100%" }}>
-                  <Input
-                    value={trainingTag}
-                    onChange={(event) => setTrainingTag(event.target.value)}
-                    placeholder="dataset tag (e.g. s07_mixed_clutter)"
-                  />
-                  <Button
-                    type="primary"
-                    onClick={() =>
-                      runAction("Timed capture started", () =>
-                        postApi("/api/recording/capture_plan_start", {
-                          tags: trainingTag,
-                          target_images: captureTargetImages,
-                          extraction_fps: captureExtractionFps,
-                          safety_buffer_sec: captureBufferSec,
-                          duration_sec: captureDurationOverrideSec,
-                        }),
-                      )
-                    }
-                  >
-                    Start Timed Capture
-                  </Button>
-                  <Button
-                    onClick={() => runAction("Manual capture started", () => postApi("/api/recording/start", { tags: trainingTag }))}
-                  >
-                    Start Manual
-                  </Button>
-                  <Button onClick={() => runAction("Capture stopped", () => postApi("/api/recording/stop", {}))}>Stop</Button>
-                </Space.Compact>
-                <Space wrap size={16}>
-                  <Space>
-                    <Text>Target images</Text>
-                    <InputNumber min={1} max={5000} value={captureTargetImages} onChange={(v) => setCaptureTargetImages(Number(v || 1))} />
-                  </Space>
-                  <Space>
-                    <Text>Extractor FPS</Text>
-                    <InputNumber
-                      min={0.1}
-                      max={30}
-                      step={0.1}
-                      value={captureExtractionFps}
-                      onChange={(v) => setCaptureExtractionFps(Number(v || 2))}
-                    />
-                  </Space>
-                  <Space>
-                    <Text>Buffer (sec)</Text>
-                    <InputNumber min={0} max={120} value={captureBufferSec} onChange={(v) => setCaptureBufferSec(Number(v || 0))} />
-                  </Space>
-                  <Space>
-                    <Text>Duration override (sec)</Text>
-                    <InputNumber
-                      min={0}
-                      max={3600}
-                      value={captureDurationOverrideSec}
-                      onChange={(v) => setCaptureDurationOverrideSec(Number(v || 0))}
-                    />
-                  </Space>
-                </Space>
-                <Alert
-                  type="info"
-                  showIcon
-                  message={`Planned capture runtime: ${plannedCaptureDurationSec.toFixed(1)} sec`}
-                  description={
-                    captureDurationOverrideSec > 0
-                      ? "Duration override is active. Target image estimate is not used for runtime."
-                      : "Runtime is estimated as target_images / extractor_fps + buffer."
-                  }
-                />
-                <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  <Text type="secondary">Bag storage root: {bagStoragePath}</Text>
-                  <Text type="secondary">Active bag output: {activeOutputDir || "n/a"}</Text>
-                  <Text type="secondary">Extracted image output: {extractedOutputPath}</Text>
-                  <Text type="secondary">
-                    Capture plan state: {capturePlan?.state || "idle"}
-                    {capturePlan?.active ? ` (remaining ${captureRemainingSec.toFixed(1)} sec)` : ""}
-                  </Text>
-                </Space>
-                <Button
-                  onClick={() =>
-                    runAction("Replay hint fetched", async () => {
-                      const rec = status?.recording?.recent?.[0];
-                      const out = await postApi<{ command?: string }>("/api/recording/replay_hint", {
-                        path: rec?.path || "",
-                      });
-                      const command = String(out.command || "");
-                      if (command) {
-                        await navigator.clipboard.writeText(command);
-                        messageApi.success("Replay command copied to clipboard");
-                      }
-                    })
-                  }
-                >
-                  Copy Replay Command (latest)
-                </Button>
-              </Space>
-            </Card>
-          </Col>
+        <Card title="Pre-Capture Camera Preview" className="hmi-card">
+          {previewTopic ? (
+            <div className="camera-frame">
+              <img
+                src={`/stream/camera.mjpeg?topic=${encodeURIComponent(previewTopic)}`}
+                alt="training-preview"
+              />
+            </div>
+          ) : (
+            <Empty description="No camera stream topic selected" />
+          )}
+          <Space wrap style={{ marginTop: 10 }}>
+            <Select
+              style={{ minWidth: 280 }}
+              value={cameraDraft || undefined}
+              placeholder="Camera MJPEG topic"
+              options={cameraStreamTopics.map((topic) => ({ value: topic, label: topic }))}
+              onChange={(value) => setCameraDraft(value)}
+            />
+            <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>
+              Apply Camera Stream
+            </Button>
+          </Space>
+          <div style={{ marginTop: 8 }}>
+            <Text type="secondary">Topic: {previewTopic || "n/a"}</Text>
+            <br />
+            <Text type="secondary">
+              hz {hz(status?.visualizer?.camera?.fps)} | age {secAge(status?.visualizer?.camera?.age_sec)}
+            </Text>
+          </div>
+        </Card>
 
-          <Col xs={24} xl={10}>
-            <Card title="Pre-Capture Camera Preview" className="hmi-card">
-              {previewTopic ? (
-                <div className="camera-frame">
-                  <img
-                    src={`/stream/camera.mjpeg?topic=${encodeURIComponent(previewTopic)}`}
-                    alt="training-preview"
-                  />
-                </div>
-              ) : (
-                <Empty description="No camera stream topic selected" />
-              )}
-              <Space wrap style={{ marginTop: 10 }}>
-                <Select
-                  style={{ minWidth: 280 }}
-                  value={cameraDraft || undefined}
-                  placeholder="Camera MJPEG topic"
-                  options={cameraStreamTopics.map((topic) => ({ value: topic, label: topic }))}
-                  onChange={(value) => setCameraDraft(value)}
-                />
-                <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>
-                  Apply Camera Stream
-                </Button>
+        <Card title="Training + Data Capture" className="hmi-card">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Text>Run guided capture by target image count, or set an explicit duration override.</Text>
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                value={trainingTag}
+                onChange={(event) => setTrainingTag(event.target.value)}
+                placeholder="dataset tag (e.g. s07_mixed_clutter)"
+              />
+              <Button
+                type="primary"
+                onClick={() =>
+                  runAction("Timed capture started", () =>
+                    postApi("/api/recording/capture_plan_start", {
+                      tags: trainingTag,
+                      target_images: captureTargetImages,
+                      extraction_fps: captureExtractionFps,
+                      safety_buffer_sec: captureBufferSec,
+                      duration_sec: captureDurationOverrideSec,
+                    }),
+                  )
+                }
+              >
+                Start Timed Capture
+              </Button>
+              <Button
+                onClick={() => runAction("Manual capture started", () => postApi("/api/recording/start", { tags: trainingTag }))}
+              >
+                Start Manual
+              </Button>
+              <Button onClick={() => runAction("Capture stopped", () => postApi("/api/recording/stop", {}))}>Stop</Button>
+            </Space.Compact>
+            <Space wrap size={16}>
+              <Space>
+                <Text>Target images</Text>
+                <InputNumber min={1} max={5000} value={captureTargetImages} onChange={(v) => setCaptureTargetImages(Number(v || 1))} />
               </Space>
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary">Topic: {previewTopic || "n/a"}</Text>
-                <br />
-                <Text type="secondary">
-                  hz {hz(status?.visualizer?.camera?.fps)} | age {secAge(status?.visualizer?.camera?.age_sec)}
-                </Text>
-              </div>
-            </Card>
-          </Col>
-        </Row>
+              <Space>
+                <Text>Extractor FPS</Text>
+                <InputNumber
+                  min={0.1}
+                  max={30}
+                  step={0.1}
+                  value={captureExtractionFps}
+                  onChange={(v) => setCaptureExtractionFps(Number(v || 2))}
+                />
+              </Space>
+              <Space>
+                <Text>Buffer (sec)</Text>
+                <InputNumber min={0} max={120} value={captureBufferSec} onChange={(v) => setCaptureBufferSec(Number(v || 0))} />
+              </Space>
+              <Space>
+                <Text>Duration override (sec)</Text>
+                <InputNumber
+                  min={0}
+                  max={3600}
+                  value={captureDurationOverrideSec}
+                  onChange={(v) => setCaptureDurationOverrideSec(Number(v || 0))}
+                />
+              </Space>
+            </Space>
+            <Alert
+              type="info"
+              showIcon
+              message={`Planned capture runtime: ${plannedCaptureDurationSec.toFixed(1)} sec`}
+              description={
+                captureDurationOverrideSec > 0
+                  ? "Duration override is active. Target image estimate is not used for runtime."
+                  : "Runtime is estimated as target_images / extractor_fps + buffer."
+              }
+            />
+            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              <Text type="secondary">Bag storage root: {bagStoragePath}</Text>
+              <Text type="secondary">Active bag output: {activeOutputDir || "n/a"}</Text>
+              <Text type="secondary">Extracted image output: {extractedOutputPath}</Text>
+              <Text type="secondary">
+                Capture plan state: {capturePlan?.state || "idle"}
+                {capturePlan?.active ? ` (remaining ${captureRemainingSec.toFixed(1)} sec)` : ""}
+              </Text>
+            </Space>
+            <Button
+              onClick={() =>
+                runAction("Replay hint fetched", async () => {
+                  const rec = status?.recording?.recent?.[0];
+                  const out = await postApi<{ command?: string }>("/api/recording/replay_hint", {
+                    path: rec?.path || "",
+                  });
+                  const command = String(out.command || "");
+                  if (command) {
+                    await navigator.clipboard.writeText(command);
+                    messageApi.success("Replay command copied to clipboard");
+                  }
+                })
+              }
+            >
+              Copy Replay Command (latest)
+            </Button>
+          </Space>
+        </Card>
       </Space>
     );
   };
