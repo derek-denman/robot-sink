@@ -8,7 +8,7 @@ log() {
 }
 
 usage() {
-  cat <<USAGE
+  cat <<'USAGE'
 Usage:
   ./sync_nodes.sh [options]
 
@@ -28,11 +28,13 @@ Options:
 
   --dry-run                  Show what would be synced
   --no-delete                Disable rsync --delete
+  --include-web              Sync `jetson/console/web` assets (default: skip)
   -h, --help                 Show this help
 
 Examples:
   ./sync_nodes.sh
   ./sync_nodes.sh --dry-run
+  ./sync_nodes.sh --include-web
   ./sync_nodes.sh --target jetson --jetson ubuntu@10.0.0.55:/home/ubuntu/robot-sink
   ./sync_nodes.sh --target beaglebone --bb-host 192.168.7.2 --bb-user debian
   ./sync_nodes.sh --bb-all
@@ -47,6 +49,7 @@ BB_DEST="~/robot-sink"
 BB_MODE="beaglebone"
 DRY_RUN=0
 DO_DELETE=1
+INCLUDE_WEB=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-delete)
       DO_DELETE=0
+      shift
+      ;;
+    --include-web)
+      INCLUDE_WEB=1
       shift
       ;;
     -h|--help)
@@ -176,7 +183,12 @@ sync_jetson() {
 
     if [[ -d "${src}" ]]; then
       log "jetson sync: ${rel_path}/"
-      rsync "${RSYNC_BASE_OPTS[@]}" "${RSYNC_DELETE_OPT[@]}" --exclude-from="${JETSON_EXCLUDES_FILE}" "${src}" "${JETSON_TARGET}/"
+      local -a extra_excludes=()
+      if [[ "${rel_path}" == "jetson" && ${INCLUDE_WEB} -eq 0 ]]; then
+        # Prevent backend-only syncs from clobbering newer web builds on Jetson.
+        extra_excludes+=(--exclude="console/web/**")
+      fi
+      rsync "${RSYNC_BASE_OPTS[@]}" "${RSYNC_DELETE_OPT[@]}" --exclude-from="${JETSON_EXCLUDES_FILE}" "${extra_excludes[@]}" "${src}" "${JETSON_TARGET}/"
     else
       log "jetson sync: ${rel_path}"
       rsync "${RSYNC_BASE_OPTS[@]}" --exclude-from="${JETSON_EXCLUDES_FILE}" "${src}" "${JETSON_TARGET}/"
@@ -226,7 +238,7 @@ sync_beaglebone() {
 }
 
 log "repo root: ${ROOT}"
-log "target=${TARGET} delete=${DO_DELETE} dry-run=${DRY_RUN}"
+log "target=${TARGET} delete=${DO_DELETE} dry-run=${DRY_RUN} include-web=${INCLUDE_WEB}"
 
 case "${TARGET}" in
   both)
