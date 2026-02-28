@@ -235,7 +235,12 @@ fi
 if [[ -n "${BASE_BRINGUP_CMD:-}" ]]; then
   start_cmd "base-bringup" "${BASE_BRINGUP_CMD}"
 elif ros_pkg_exists base_bringup; then
-  start_cmd "base-bringup" "$(retry_loop_cmd "base-bringup" "ros2 launch base_bringup base_tf.launch.py config_file:=${BASE_BRINGUP_CONFIG}" 3)"
+  if process_running "[b]ase_bringup base_tf.launch.py" || process_running "[b]bb_odom_tf_bridge"; then
+    log "Detected existing base bringup process; reusing existing runtime."
+    start_cmd "base-bringup" "python3 ${SCRIPT_DIR}/runtime_stub.py --name base-bringup --hint 'base_bringup already running; using existing process'"
+  else
+    start_cmd "base-bringup" "$(retry_loop_cmd "base-bringup" "ros2 launch base_bringup base_tf.launch.py config_file:=${BASE_BRINGUP_CONFIG}" 3)"
+  fi
 elif [[ -n "${BB_BRIDGE_CMD:-}" ]]; then
   start_cmd "bb-bridge" "${BB_BRIDGE_CMD}"
 else

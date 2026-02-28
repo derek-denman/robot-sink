@@ -112,6 +112,9 @@ class BBBOdomTFBridge(Node):
             "bbb_odom_tf_bridge started: "
             f"url={self._status_url} poll_hz={self._poll_hz:.1f} stale_ms={self._stale_timeout_sec * 1000.0:.0f}"
         )
+        self.get_logger().info(
+            "Only run one instance of bbb_odom_tf_bridge/base_tf.launch.py to avoid competing odom->base_link TF."
+        )
 
     def _declare_string_param(self, name: str, default: str) -> str:
         self.declare_parameter(name, default)

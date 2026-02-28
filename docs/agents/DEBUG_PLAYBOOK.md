@@ -56,7 +56,17 @@ ros2 run tf2_ros tf2_echo base_link laser
 ros2 run tf2_ros tf2_echo base_link oak-d-base-frame
 ```
 
-If `odom->base_link` is stale or missing, verify `base_bringup` launch:
+If `odom->base_link` is stale or missing, first check for duplicate base TF publishers:
+```bash
+pgrep -af "base_tf.launch.py|bbb_odom_tf_bridge|base_bringup"
+```
+
+Expected: only one effective `base_bringup`/`bbb_odom_tf_bridge` publisher path.
+
+If you are using `./jetson/scripts/run_stack.sh`, do not manually launch
+`ros2 launch base_bringup base_tf.launch.py` at the same time.
+
+If base TF is not running and stack-managed launch is disabled/unavailable, start it manually:
 ```bash
 ros2 launch base_bringup base_tf.launch.py
 ```
