@@ -10,16 +10,18 @@ log() {
 usage() {
   cat <<USAGE
 Usage:
-  ./jetson/scripts/sync_to_jetson.sh [--dry-run] [--no-delete] user@JETSON_IP:/home/user/robot-sink
+  ./jetson/scripts/sync_to_jetson.sh [--dry-run] [--no-delete] [--include-web] user@JETSON_IP:/home/user/robot-sink
 
 Examples:
   ./jetson/scripts/sync_to_jetson.sh ubuntu@192.168.1.42:/home/ubuntu/robot-sink
   ./jetson/scripts/sync_to_jetson.sh --dry-run ubuntu@192.168.1.42:/home/ubuntu/robot-sink
+  ./jetson/scripts/sync_to_jetson.sh --include-web ubuntu@192.168.1.42:/home/ubuntu/robot-sink
 USAGE
 }
 
 DRY_RUN=0
 DO_DELETE=1
+INCLUDE_WEB=0
 TARGET=""
 
 while [[ $# -gt 0 ]]; do
@@ -30,6 +32,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-delete)
       DO_DELETE=0
+      shift
+      ;;
+    --include-web)
+      INCLUDE_WEB=1
       shift
       ;;
     -h|--help)
@@ -81,6 +87,7 @@ log "target host: ${REMOTE_HOST}"
 log "target path: ${REMOTE_PATH}"
 log "delete mode: ${DO_DELETE}"
 log "dry run: ${DRY_RUN}"
+log "include web assets: ${INCLUDE_WEB}"
 
 ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_PATH}'"
 
@@ -90,6 +97,11 @@ RSYNC_OPTS=(
   --partial
   --exclude-from="${EXCLUDES_FILE}"
 )
+
+if [[ ${INCLUDE_WEB} -eq 0 ]]; then
+  # Prevent backend-only syncs from overwriting a newer web build on Jetson.
+  RSYNC_OPTS+=(--exclude="jetson/console/web/**")
+fi
 
 if rsync --help 2>&1 | grep -q -- "--info"; then
   RSYNC_OPTS+=(--info=stats2,progress2)
