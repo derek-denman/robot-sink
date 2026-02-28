@@ -7,6 +7,16 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+try:  # pragma: no cover - optional runtime dependency
+    import cv2  # type: ignore
+except ImportError:  # pragma: no cover
+    cv2 = None  # type: ignore
+
+try:  # pragma: no cover - optional runtime dependency
+    import numpy as np  # type: ignore
+except ImportError:  # pragma: no cover
+    np = None  # type: ignore
+
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.action import ActionClient
@@ -217,6 +227,8 @@ class RosAdapters:
                 durability=DurabilityPolicy.VOLATILE,
             ),
         ]
+        self._rgb_jpeg_cache_lock = threading.Lock()
+        self._rgb_jpeg_cache: Dict[str, Any] = {}
 
         configured_stream_topics = topics.get("camera_compressed_topics", []) or []
         configured_stream_topics = [
@@ -1346,9 +1358,96 @@ class RosAdapters:
                     "height": int(msg.height),
                     "step": int(msg.step),
                     "topic": topic_name,
+                    "data": bytes(msg.data) if topic_name == self._rgb_topic else b"",
                 }
 
         return _cb
+
+    def _encode_raw_rgb_to_jpeg(self, frame: Dict[str, Any]) -> Optional[bytes]:
+        if cv2 is None or np is None:
+            return None
+
+        encoding = str(frame.get("encoding", "")).lower()
+        width = int(frame.get("width") or 0)
+        height = int(frame.get("height") or 0)
+        step = int(frame.get("step") or 0)
+        raw = frame.get("data", b"")
+        if width <= 0 or height <= 0 or step <= 0 or not raw:
+            return None
+
+        data = bytes(raw)
+        row_bytes = step * height
+        if len(data) < row_bytes:
+            return None
+
+        try:
+            row_matrix = np.frombuffer(data[:row_bytes], dtype=np.uint8).reshape((height, step))
+        except Exception:
+            return None
+
+        image = None
+        if encoding in ("bgr8", "rgb8"):
+            pixel_bytes = width * 3
+            if step < pixel_bytes:
+                return None
+            try:
+                image = row_matrix[:, :pixel_bytes].reshape((height, width, 3))
+            except Exception:
+                return None
+            if encoding == "rgb8":
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        elif encoding in ("mono8", "8uc1"):
+            pixel_bytes = width
+            if step < pixel_bytes:
+                return None
+            image = row_matrix[:, :pixel_bytes]
+        else:
+            return None
+
+        try:
+            ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        except Exception:
+            return None
+        if not ok:
+            return None
+        return bytes(encoded)
+
+    def _latest_rgb_fallback_jpeg(self) -> Optional[Dict[str, Any]]:
+        with self._camera_raw_lock:
+            frame = dict(self._camera_raw_state.get(self._rgb_topic, {}))
+        stamp_unix = float(frame.get("stamp_unix") or 0.0)
+        if stamp_unix <= 0.0:
+            return None
+
+        with self._rgb_jpeg_cache_lock:
+            if (
+                float(self._rgb_jpeg_cache.get("stamp_unix", 0.0)) == stamp_unix
+                and self._rgb_jpeg_cache.get("data")
+            ):
+                cached = bytes(self._rgb_jpeg_cache["data"])
+                return {
+                    "topic": f"{self._rgb_topic} (raw-fallback)",
+                    "stamp_unix": stamp_unix,
+                    "format": "bgr8; jpeg fallback",
+                    "data": cached,
+                }
+
+        jpeg = self._encode_raw_rgb_to_jpeg(frame)
+        if not jpeg:
+            return None
+
+        with self._rgb_jpeg_cache_lock:
+            self._rgb_jpeg_cache = {
+                "stamp_unix": stamp_unix,
+                "data": jpeg,
+            }
+
+        return {
+            "topic": f"{self._rgb_topic} (raw-fallback)",
+            "stamp_unix": stamp_unix,
+            "format": "bgr8; jpeg fallback",
+            "data": jpeg,
+        }
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._mark_topic("camera_info")
@@ -2631,19 +2730,30 @@ class RosAdapters:
 
     def latest_camera_frame(self) -> Optional[Dict[str, Any]]:
         topic = self._camera_stream_topic
-        if not topic:
-            return None
+        now = time.time()
+        stream_frame: Optional[Dict[str, Any]] = None
 
-        with self._camera_stream_lock:
-            frame = self._camera_stream_frames.get(topic)
-            if frame is None:
-                return None
-            return {
-                "topic": topic,
-                "stamp_unix": float(frame.get("stamp_unix", 0.0)),
-                "format": frame.get("format", ""),
-                "data": frame.get("data", b""),
-            }
+        if topic:
+            with self._camera_stream_lock:
+                frame = self._camera_stream_frames.get(topic)
+                if frame is not None:
+                    stream_frame = {
+                        "topic": topic,
+                        "stamp_unix": float(frame.get("stamp_unix", 0.0)),
+                        "format": frame.get("format", ""),
+                        "data": frame.get("data", b""),
+                    }
+
+        if stream_frame and stream_frame.get("data"):
+            age_sec = max(0.0, now - float(stream_frame.get("stamp_unix", 0.0)))
+            if age_sec < 2.5:
+                return stream_frame
+
+        fallback = self._latest_rgb_fallback_jpeg()
+        if fallback is not None:
+            return fallback
+
+        return stream_frame
 
     def _camera_topic_metrics(self, topics: Sequence[str]) -> List[Dict[str, Any]]:
         now = time.time()
@@ -2715,6 +2825,16 @@ class RosAdapters:
                 "connected": False,
                 "format": None,
             }
+
+        if not selected_metric.get("connected", False):
+            rgb_status = self.rgb_raw_status()
+            if rgb_status.get("connected", False):
+                selected_metric = {
+                    "fps": rgb_status.get("fps", 0.0),
+                    "age_sec": rgb_status.get("age_sec"),
+                    "connected": True,
+                    "format": selected_metric.get("format") or "jpeg raw fallback",
+                }
 
         return {
             "selected_topic": topic,
