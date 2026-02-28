@@ -40,6 +40,8 @@
 ```bash
 # Uses exclude list at jetson/scripts/sync_to_jetson.exclude
 ./jetson/scripts/sync_to_jetson.sh --dry-run ubuntu@JETSON_IP:/home/ubuntu/robot-sink
+# Syncs `jetson/console/web` only when explicitly requested
+./jetson/scripts/sync_to_jetson.sh --include-web ubuntu@JETSON_IP:/home/ubuntu/robot-sink
 ```
 
 ### Sync Both Nodes
@@ -48,6 +50,8 @@
 ```
 ```bash
 ./sync_nodes.sh --dry-run
+# Syncs `jetson/console/web` only when explicitly requested
+./sync_nodes.sh --include-web
 ./sync_nodes.sh --target jetson --jetson ubuntu@JETSON_IP:/home/ubuntu/robot-sink
 ./sync_nodes.sh --target beaglebone --bb-host 192.168.7.2 --bb-user debian --bb-dest ~/robot-sink
 ```

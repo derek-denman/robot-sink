@@ -70,6 +70,10 @@ npm install
 npm run build:web
 ```
 
+Note:
+- `sync_to_jetson.sh` skips `jetson/console/web` by default to prevent backend syncs from reverting the console UI.
+- Use `--include-web` only when you intentionally want to copy repo web assets.
+
 ## Enable SLAM/Nav2 Runtime
 
 `run_stack.sh` does not auto-launch SLAM Toolbox/Nav2. Mapping/Nav buttons require those nodes.

@@ -41,6 +41,14 @@ From repo root on your dev machine:
 ./jetson/scripts/sync_to_jetson.sh ubuntu@JETSON_IP:/home/ubuntu/robot-sink
 ```
 
+Notes:
+- `sync_to_jetson.sh` skips `jetson/console/web` by default to avoid overwriting a newer web build on Jetson during backend-only syncs.
+- To explicitly sync repo web assets, use:
+
+```bash
+./jetson/scripts/sync_to_jetson.sh --include-web ubuntu@JETSON_IP:/home/ubuntu/robot-sink
+```
+
 ## 5) Run Jetson Bring-Up Scripts (On Jetson)
 
 ```bash
