@@ -1830,139 +1830,243 @@ export default function App(): JSX.Element {
     const previewTopic = cameraDraft || robot.selectedCameraTopic || "";
 
     return (
-      <Space direction="vertical" size={16} style={{ width: "100%" }}>
-        <Card title="Pre-Capture Camera Preview" className="hmi-card">
-          {previewTopic ? (
-            <div className="camera-frame">
-              <img
-                src={`/stream/camera.mjpeg?topic=${encodeURIComponent(previewTopic)}`}
-                alt="training-preview"
-              />
-            </div>
-          ) : (
-            <Empty description="No camera stream topic selected" />
-          )}
-          <Space wrap style={{ marginTop: 10 }}>
-            <Select
-              style={{ minWidth: 280 }}
-              value={cameraDraft || undefined}
-              placeholder="Camera MJPEG topic"
-              options={cameraStreamTopics.map((topic) => ({ value: topic, label: topic }))}
-              onChange={(value) => setCameraDraft(value)}
-            />
-            <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>
-              Apply Camera Stream
-            </Button>
-          </Space>
-          <div style={{ marginTop: 8 }}>
-            <Text type="secondary">Topic: {previewTopic || "n/a"}</Text>
-            <br />
-            <Text type="secondary">
-              hz {hz(status?.visualizer?.camera?.fps)} | age {secAge(status?.visualizer?.camera?.age_sec)}
-            </Text>
-          </div>
-        </Card>
-
-        <Card title="Training + Data Capture" className="hmi-card">
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Text>Run guided capture by target image count, or set an explicit duration override.</Text>
-            <Space.Compact style={{ width: "100%" }}>
-              <Input
-                value={trainingTag}
-                onChange={(event) => setTrainingTag(event.target.value)}
-                placeholder="dataset tag (e.g. s07_mixed_clutter)"
-              />
-              <Button
-                type="primary"
-                onClick={() =>
-                  runAction("Timed capture started", () =>
-                    postApi("/api/recording/capture_plan_start", {
-                      tags: trainingTag,
-                      target_images: captureTargetImages,
-                      extraction_fps: captureExtractionFps,
-                      safety_buffer_sec: captureBufferSec,
-                      duration_sec: captureDurationOverrideSec,
-                    }),
-                  )
-                }
-              >
-                Start Timed Capture
-              </Button>
-              <Button
-                onClick={() => runAction("Manual capture started", () => postApi("/api/recording/start", { tags: trainingTag }))}
-              >
-                Start Manual
-              </Button>
-              <Button onClick={() => runAction("Capture stopped", () => postApi("/api/recording/stop", {}))}>Stop</Button>
-            </Space.Compact>
-            <Space wrap size={16}>
-              <Space>
-                <Text>Target images</Text>
-                <InputNumber min={1} max={5000} value={captureTargetImages} onChange={(v) => setCaptureTargetImages(Number(v || 1))} />
+      <Collapse
+        className="hmi-card"
+        defaultActiveKey={["preview", "capture"]}
+        items={[
+          {
+            key: "preview",
+            label: "Pre-Capture Camera Preview",
+            children: (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                {previewTopic ? (
+                  <div className="camera-frame">
+                    <img
+                      src={`/stream/camera.mjpeg?topic=${encodeURIComponent(previewTopic)}`}
+                      alt="training-preview"
+                    />
+                  </div>
+                ) : (
+                  <Empty description="No camera stream topic selected" />
+                )}
+                <Space wrap style={{ marginTop: 2 }}>
+                  <Select
+                    style={{ minWidth: 280 }}
+                    value={cameraDraft || undefined}
+                    placeholder="Camera MJPEG topic"
+                    options={cameraStreamTopics.map((topic) => ({ value: topic, label: topic }))}
+                    onChange={(value) => setCameraDraft(value)}
+                  />
+                  <Button onClick={() => runAction("Camera topic selected", applyCameraTopic)}>
+                    Apply Camera Stream
+                  </Button>
+                </Space>
+                <div>
+                  <Text type="secondary">Topic: {previewTopic || "n/a"}</Text>
+                  <br />
+                  <Text type="secondary">
+                    hz {hz(status?.visualizer?.camera?.fps)} | age {secAge(status?.visualizer?.camera?.age_sec)}
+                  </Text>
+                </div>
               </Space>
-              <Space>
-                <Text>Extractor FPS</Text>
-                <InputNumber
-                  min={0.1}
-                  max={30}
-                  step={0.1}
-                  value={captureExtractionFps}
-                  onChange={(v) => setCaptureExtractionFps(Number(v || 2))}
-                />
-              </Space>
-              <Space>
-                <Text>Buffer (sec)</Text>
-                <InputNumber min={0} max={120} value={captureBufferSec} onChange={(v) => setCaptureBufferSec(Number(v || 0))} />
-              </Space>
-              <Space>
-                <Text>Duration override (sec)</Text>
-                <InputNumber
-                  min={0}
-                  max={3600}
-                  value={captureDurationOverrideSec}
-                  onChange={(v) => setCaptureDurationOverrideSec(Number(v || 0))}
-                />
-              </Space>
-            </Space>
-            <Alert
-              type="info"
-              showIcon
-              message={`Planned capture runtime: ${plannedCaptureDurationSec.toFixed(1)} sec`}
-              description={
-                captureDurationOverrideSec > 0
-                  ? "Duration override is active. Target image estimate is not used for runtime."
-                  : "Runtime is estimated as target_images / extractor_fps + buffer."
-              }
-            />
-            <Space direction="vertical" size={4} style={{ width: "100%" }}>
-              <Text type="secondary">Bag storage root: {bagStoragePath}</Text>
-              <Text type="secondary">Active bag output: {activeOutputDir || "n/a"}</Text>
-              <Text type="secondary">Extracted image output: {extractedOutputPath}</Text>
-              <Text type="secondary">
-                Capture plan state: {capturePlan?.state || "idle"}
-                {capturePlan?.active ? ` (remaining ${captureRemainingSec.toFixed(1)} sec)` : ""}
-              </Text>
-            </Space>
-            <Button
-              onClick={() =>
-                runAction("Replay hint fetched", async () => {
-                  const rec = status?.recording?.recent?.[0];
-                  const out = await postApi<{ command?: string }>("/api/recording/replay_hint", {
-                    path: rec?.path || "",
-                  });
-                  const command = String(out.command || "");
-                  if (command) {
-                    await navigator.clipboard.writeText(command);
-                    messageApi.success("Replay command copied to clipboard");
+            ),
+          },
+          {
+            key: "capture",
+            label: "Training + Data Capture",
+            children: (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Text>Run guided capture by target image count, or set an explicit duration override.</Text>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Input
+                    value={trainingTag}
+                    onChange={(event) => setTrainingTag(event.target.value)}
+                    placeholder="dataset tag (e.g. s07_mixed_clutter)"
+                  />
+                  <Button
+                    type="primary"
+                    onClick={() =>
+                      runAction("Timed capture started", () =>
+                        postApi("/api/recording/capture_plan_start", {
+                          tags: trainingTag,
+                          target_images: captureTargetImages,
+                          extraction_fps: captureExtractionFps,
+                          safety_buffer_sec: captureBufferSec,
+                          duration_sec: captureDurationOverrideSec,
+                        }),
+                      )
+                    }
+                  >
+                    Start Timed Capture
+                  </Button>
+                  <Button
+                    onClick={() => runAction("Manual capture started", () => postApi("/api/recording/start", { tags: trainingTag }))}
+                  >
+                    Start Manual
+                  </Button>
+                  <Button onClick={() => runAction("Capture stopped", () => postApi("/api/recording/stop", {}))}>Stop</Button>
+                </Space.Compact>
+                <Space wrap size={16}>
+                  <Space>
+                    <Text>Target images</Text>
+                    <InputNumber min={1} max={5000} value={captureTargetImages} onChange={(v) => setCaptureTargetImages(Number(v || 1))} />
+                  </Space>
+                  <Space>
+                    <Text>Extractor FPS</Text>
+                    <InputNumber
+                      min={0.1}
+                      max={30}
+                      step={0.1}
+                      value={captureExtractionFps}
+                      onChange={(v) => setCaptureExtractionFps(Number(v || 2))}
+                    />
+                  </Space>
+                  <Space>
+                    <Text>Buffer (sec)</Text>
+                    <InputNumber min={0} max={120} value={captureBufferSec} onChange={(v) => setCaptureBufferSec(Number(v || 0))} />
+                  </Space>
+                  <Space>
+                    <Text>Duration override (sec)</Text>
+                    <InputNumber
+                      min={0}
+                      max={3600}
+                      value={captureDurationOverrideSec}
+                      onChange={(v) => setCaptureDurationOverrideSec(Number(v || 0))}
+                    />
+                  </Space>
+                </Space>
+                <Alert
+                  type="info"
+                  showIcon
+                  message={`Planned capture runtime: ${plannedCaptureDurationSec.toFixed(1)} sec`}
+                  description={
+                    captureDurationOverrideSec > 0
+                      ? "Duration override is active. Target image estimate is not used for runtime."
+                      : "Runtime is estimated as target_images / extractor_fps + buffer."
                   }
-                })
-              }
-            >
-              Copy Replay Command (latest)
-            </Button>
-          </Space>
-        </Card>
-      </Space>
+                />
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Text type="secondary">Bag storage root: {bagStoragePath}</Text>
+                  <Text type="secondary">Active bag output: {activeOutputDir || "n/a"}</Text>
+                  <Text type="secondary">Extracted image output: {extractedOutputPath}</Text>
+                  <Text type="secondary">
+                    Capture plan state: {capturePlan?.state || "idle"}
+                    {capturePlan?.active ? ` (remaining ${captureRemainingSec.toFixed(1)} sec)` : ""}
+                  </Text>
+                </Space>
+                <Button
+                  onClick={() =>
+                    runAction("Replay hint fetched", async () => {
+                      const rec = status?.recording?.recent?.[0];
+                      const out = await postApi<{ command?: string }>("/api/recording/replay_hint", {
+                        path: rec?.path || "",
+                      });
+                      const command = String(out.command || "");
+                      if (command) {
+                        await navigator.clipboard.writeText(command);
+                        messageApi.success("Replay command copied to clipboard");
+                      }
+                    })
+                  }
+                >
+                  Copy Replay Command (latest)
+                </Button>
+              </Space>
+            ),
+          },
+          {
+            key: "instructions",
+            label: "Step-by-Step Instructions (First-Time Users)",
+            children: (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Text>
+                  Use these steps to capture data, label in CVAT, and prepare for training. Full guide:
+                  {" "}
+                  <Text code>docs/perception/toy_shoe_training_data_capture_guide.md</Text>
+                </Text>
+                <ol style={{ margin: 0, paddingLeft: 18 }}>
+                  <li>
+                    <Text strong>Check your camera view first.</Text>
+                    <br />
+                    <Text type="secondary">Open the Pre-Capture panel, select a topic, and click Apply Camera Stream.</Text>
+                  </li>
+                  <li>
+                    <Text strong>Enter a session tag.</Text>
+                    <br />
+                    <Text type="secondary">
+                      Example: <Text code>s07_mixed_clutter_room_a</Text>. Use one tag per recording session.
+                    </Text>
+                  </li>
+                  <li>
+                    <Text strong>Set capture amount.</Text>
+                    <br />
+                    <Text type="secondary">
+                      Start with 120 target images at 2 FPS. Keep Buffer at 8 seconds unless you need a longer stop margin.
+                    </Text>
+                  </li>
+                  <li>
+                    <Text strong>Capture data.</Text>
+                    <br />
+                    <Text type="secondary">Click Start Timed Capture, wait for it to finish, and verify the output paths shown on this page.</Text>
+                  </li>
+                  <li>
+                    <Text strong>Repeat for all session types.</Text>
+                    <br />
+                    <Text type="secondary">Collect toy-only, shoe-only, mixed-clutter, and empty-floor sessions across different lighting and backgrounds.</Text>
+                  </li>
+                </ol>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Do not label bad sessions"
+                  description="If frames are from the wrong room or contain no useful toy/shoe examples, discard and recapture before CVAT."
+                />
+                <div
+                  style={{
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    borderRadius: 8,
+                    padding: 12,
+                  }}
+                >
+                  <Text strong>CVAT labeling steps (beginner)</Text>
+                  <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+                    <li>
+                      <Text type="secondary">
+                        Open CVAT at <Text code>http://&lt;jetson-ip&gt;:8080</Text> and sign in.
+                      </Text>
+                    </li>
+                    <li>
+                      <Text type="secondary">
+                        Create one task per session. Name it exactly like your session tag.
+                      </Text>
+                    </li>
+                    <li>
+                      <Text type="secondary">
+                        Add labels exactly as: <Text code>toy</Text> and <Text code>shoe</Text>. No extra labels.
+                      </Text>
+                    </li>
+                    <li>
+                      <Text type="secondary">
+                        Upload only that session’s extracted images, then draw tight boxes around every visible toy/shoe.
+                      </Text>
+                    </li>
+                    <li>
+                      <Text type="secondary">
+                        Export as <Text code>Ultralytics YOLO 1.0</Text> and save the zip in
+                        {" "}
+                        <Text code>dataset/cvat/exports/</Text>.
+                      </Text>
+                    </li>
+                  </ol>
+                </div>
+                <Text type="secondary">
+                  Important: CVAT train/val split files are ignored by this project. Session-separated splits are built by repo scripts.
+                </Text>
+              </Space>
+            ),
+          },
+        ]}
+      />
     );
   };
 

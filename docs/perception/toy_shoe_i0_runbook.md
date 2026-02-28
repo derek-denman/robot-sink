@@ -22,6 +22,7 @@ Iteration-0 builds a safety-biased binary detector (`toy`, `shoe`) and ROS2 safe
 - Labels schema: `docs/perception/cvat_labels_toy_shoe.json` (`toy`, `shoe` only).
 - Capture plan/status: `docs/perception/i0_capture_manifest.csv`.
 - Report template: `docs/perception/i0_report_template.md`.
+- Beginner capture + CVAT walkthrough: `docs/perception/toy_shoe_training_data_capture_guide.md`.
 
 ## Pipeline Commands
 1. Deterministic rosbag extraction:

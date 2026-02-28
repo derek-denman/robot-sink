@@ -9,6 +9,7 @@
 
 ## Perception Docs
 - `docs/perception/toy_shoe_i0_runbook.md`
+- `docs/perception/toy_shoe_training_data_capture_guide.md`
 - `docs/perception/cvat_labels_toy_shoe.json`
 - `docs/perception/i0_capture_manifest.csv`
 - `docs/perception/i0_report_template.md`
