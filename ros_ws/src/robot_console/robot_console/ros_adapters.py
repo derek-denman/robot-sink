@@ -1337,6 +1337,7 @@ class RosAdapters:
         key = f"camera:{topic_name}"
 
         def _cb(msg: Image) -> None:
+            arrival_unix = time.time()
             self._mark_topic("camera")
             self._mark_topic(key)
             if topic_name == self._depth_topic:
@@ -1351,7 +1352,9 @@ class RosAdapters:
 
             with self._camera_raw_lock:
                 self._camera_raw_state[topic_name] = {
-                    "stamp_unix": self._stamp_to_unix(msg.header.stamp),
+                    # Use receive time for stream freshness; some camera drivers expose
+                    # sparse or non-monotonic header stamps for RGB preview frames.
+                    "stamp_unix": arrival_unix,
                     "frame_id": msg.header.frame_id,
                     "encoding": msg.encoding,
                     "width": int(msg.width),
