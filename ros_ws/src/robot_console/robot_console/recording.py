@@ -16,6 +16,31 @@ def _slugify(value: str) -> str:
     return cleaned[:48] or "session"
 
 
+def compute_guided_capture_duration_sec(
+    *,
+    target_images: int,
+    extraction_fps: float,
+    duration_override_sec: float,
+    safety_buffer_sec: float,
+) -> float:
+    """Compute planned bag duration for extraction-targeted capture.
+
+    If duration_override_sec is positive, it is used directly.
+    Otherwise duration is derived from target_images / extraction_fps plus buffer.
+    """
+    override = float(duration_override_sec)
+    if override > 0.0:
+        return override
+
+    if target_images <= 0:
+        raise ValueError("target_images must be > 0 when no duration override is provided")
+    if extraction_fps <= 0.0:
+        raise ValueError("extraction_fps must be > 0")
+
+    duration = (float(target_images) / float(extraction_fps)) + max(0.0, float(safety_buffer_sec))
+    return max(1.0, duration)
+
+
 @dataclass
 class BagSession:
     output_dir: Path

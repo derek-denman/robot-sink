@@ -11,7 +11,8 @@ const FRIENDLY_ERRORS: Record<string, string> = {
   service_unavailable: "Required ROS service is unavailable.",
   slam_save_service_unavailable: "SLAM save-map service is unavailable.",
   switch_to_localization_cmd_not_configured: "Localization switch command is not configured.",
-  command_not_configured: "Command is not configured."
+  command_not_configured: "Command is not configured.",
+  invalid_capture_plan: "Capture plan values are invalid. Check target images, FPS, and duration."
 };
 
 function friendlyText(value: string): string {

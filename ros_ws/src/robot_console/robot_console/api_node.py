@@ -20,7 +20,7 @@ from rclpy.node import Node
 from .diagnostics import DiagnosticsProvider
 from .logs import ConsoleLogCatalog
 from .modes import ModeManager, RobotMode
-from .recording import RosbagRecorder
+from .recording import RosbagRecorder, compute_guided_capture_duration_sec
 from .ros_adapters import RosAdapters
 
 
@@ -206,6 +206,24 @@ class RobotConsoleApiNode(Node):
             "target_count": 0,
             "completed_count": 0,
         }
+        self._capture_plan_timer: Optional[threading.Timer] = None
+        self._capture_plan_state: Dict[str, Any] = {
+            "active": False,
+            "state": "idle",
+            "tag": "",
+            "target_images": 0,
+            "extraction_fps": 2.0,
+            "duration_sec": 0.0,
+            "started_unix": None,
+            "stop_at_unix": None,
+            "completed_unix": None,
+            "output_dir": "",
+            "bag_storage_path": str(self.recorder.storage_path),
+            "extractor_output_path": str(
+                self._robot_root / "ros_ws/src/perception/toy_shoe_perception/dataset/extracted"
+            ),
+            "last_result": {},
+        }
         self._demo_cancel = threading.Event()
 
         scan_push_hz = float(self._config.get("streaming", {}).get("scan_push_hz", 8.0))
@@ -350,6 +368,7 @@ class RobotConsoleApiNode(Node):
             "recording": {
                 "status": self.recorder.status(),
                 "recent": self.recorder.list_recent(limit=8),
+                "capture_plan": self.capture_plan_status(),
             },
             "reliability": reliability,
             "commissioning": commissioning,
@@ -554,6 +573,105 @@ class RobotConsoleApiNode(Node):
         if not self._ws_clients:
             return
         self._queue_coro(self.broadcast_event("detections", payload))
+
+    def _cancel_capture_plan_timer_locked(self) -> None:
+        if self._capture_plan_timer is not None:
+            self._capture_plan_timer.cancel()
+            self._capture_plan_timer = None
+
+    def capture_plan_status(self) -> Dict[str, Any]:
+        with self._state_lock:
+            return copy.deepcopy(self._capture_plan_state)
+
+    def _set_capture_plan_state(self, **kwargs: Any) -> None:
+        with self._state_lock:
+            self._capture_plan_state.update(kwargs)
+
+    def start_guided_capture(
+        self,
+        *,
+        tag: str,
+        topics: List[str],
+        target_images: int,
+        extraction_fps: float,
+        duration_override_sec: float,
+        safety_buffer_sec: float,
+    ) -> Dict[str, Any]:
+        try:
+            planned_duration_sec = compute_guided_capture_duration_sec(
+                target_images=int(target_images),
+                extraction_fps=float(extraction_fps),
+                duration_override_sec=float(duration_override_sec),
+                safety_buffer_sec=float(safety_buffer_sec),
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": "invalid_capture_plan", "detail": str(exc)}
+
+        result = self.recorder.start(tag=tag, topics=topics)
+        if not result.get("ok", False):
+            return result
+
+        active = result.get("active", {})
+        now = time.time()
+        stop_at_unix = now + planned_duration_sec
+
+        with self._state_lock:
+            self._cancel_capture_plan_timer_locked()
+            timer = threading.Timer(planned_duration_sec, self._auto_stop_capture_worker)
+            timer.daemon = True
+            timer.start()
+            self._capture_plan_timer = timer
+            self._capture_plan_state.update(
+                {
+                    "active": True,
+                    "state": "running",
+                    "tag": str(active.get("tag", tag)),
+                    "target_images": int(target_images),
+                    "extraction_fps": float(extraction_fps),
+                    "duration_sec": float(planned_duration_sec),
+                    "started_unix": now,
+                    "stop_at_unix": stop_at_unix,
+                    "completed_unix": None,
+                    "output_dir": str(active.get("output_dir", "")),
+                    "last_result": {},
+                }
+            )
+
+        return {
+            "ok": True,
+            "active": active,
+            "capture_plan": self.capture_plan_status(),
+        }
+
+    def stop_capture_and_clear_plan(self, reason: str) -> Dict[str, Any]:
+        result = self.recorder.stop()
+        with self._state_lock:
+            self._cancel_capture_plan_timer_locked()
+            self._capture_plan_state.update(
+                {
+                    "active": False,
+                    "state": reason,
+                    "completed_unix": time.time(),
+                    "stop_at_unix": None,
+                    "last_result": result,
+                }
+            )
+        return result
+
+    def _auto_stop_capture_worker(self) -> None:
+        result = self.recorder.stop()
+        with self._state_lock:
+            self._capture_plan_timer = None
+            self._capture_plan_state.update(
+                {
+                    "active": False,
+                    "state": "auto_stopped" if result.get("ok", False) else "auto_stop_failed",
+                    "completed_unix": time.time(),
+                    "stop_at_unix": None,
+                    "last_result": result,
+                }
+            )
+        self._queue_status_push()
 
     async def broadcast_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         if not self._ws_clients:
@@ -789,6 +907,8 @@ class RobotConsoleApiNode(Node):
         self._queue_status_push()
 
     def shutdown(self) -> None:
+        with self._state_lock:
+            self._cancel_capture_plan_timer_locked()
         try:
             self.adapters.publish_stop()
         except Exception:
@@ -1279,11 +1399,47 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
             topics = []
 
         result = node.recorder.start(tag=tags, topics=topics)
+        if result.get("ok", False):
+            node._set_capture_plan_state(
+                active=False,
+                state="manual",
+                tag=str(result.get("active", {}).get("tag", tags)),
+                target_images=0,
+                duration_sec=0.0,
+                started_unix=time.time(),
+                stop_at_unix=None,
+                completed_unix=None,
+                output_dir=str(result.get("active", {}).get("output_dir", "")),
+                last_result={},
+            )
         node._queue_status_push()
         return _app_response(result.get("ok", False), result=result)
 
     async def recording_stop(_request: web.Request) -> web.Response:
-        result = node.recorder.stop()
+        result = node.stop_capture_and_clear_plan(reason="manual_stopped")
+        node._queue_status_push()
+        return _app_response(result.get("ok", False), result=result)
+
+    async def recording_capture_plan_start(request: web.Request) -> web.Response:
+        payload = await _json_request(request)
+        tags = str(payload.get("tags", "training"))
+        topics = payload.get("topics", [])
+        if not isinstance(topics, list):
+            topics = []
+
+        target_images = int(payload.get("target_images", 120))
+        extraction_fps = float(payload.get("extraction_fps", 2.0))
+        duration_override_sec = float(payload.get("duration_sec", 0.0))
+        safety_buffer_sec = float(payload.get("safety_buffer_sec", 8.0))
+
+        result = node.start_guided_capture(
+            tag=tags,
+            topics=topics,
+            target_images=target_images,
+            extraction_fps=extraction_fps,
+            duration_override_sec=duration_override_sec,
+            safety_buffer_sec=safety_buffer_sec,
+        )
         node._queue_status_push()
         return _app_response(result.get("ok", False), result=result)
 
@@ -1612,6 +1768,7 @@ def create_app(node: RobotConsoleApiNode) -> web.Application:
 
     app.router.add_post("/api/recording/start", recording_start)
     app.router.add_post("/api/recording/stop", recording_stop)
+    app.router.add_post("/api/recording/capture_plan_start", recording_capture_plan_start)
     app.router.add_get("/api/recording/list", recording_list)
     app.router.add_post("/api/recording/replay_hint", recording_replay_hint)
 

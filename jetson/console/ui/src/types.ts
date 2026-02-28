@@ -438,7 +438,16 @@ export type StatusPayload = {
   };
   recording: {
     status: {
-      active: string | null;
+      active:
+        | {
+            output_dir: string;
+            tag: string;
+            pid: number;
+            cmd: string[];
+            started_unix: number;
+            log_file: string;
+          }
+        | null;
       storage_path: string;
     };
     recent: Array<{
@@ -447,6 +456,21 @@ export type StatusPayload = {
       mtime_unix: number;
       size_bytes: number;
     }>;
+    capture_plan: {
+      active: boolean;
+      state: string;
+      tag: string;
+      target_images: number;
+      extraction_fps: number;
+      duration_sec: number;
+      started_unix: number | null;
+      stop_at_unix: number | null;
+      completed_unix: number | null;
+      output_dir: string;
+      bag_storage_path: string;
+      extractor_output_path: string;
+      last_result?: Record<string, unknown>;
+    };
   };
   reliability: {
     topic_rates: Record<string, number>;

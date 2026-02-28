@@ -177,6 +177,10 @@ export default function App(): JSX.Element {
   const [rightBank, setRightBank] = useState(0);
   const [jointValues, setJointValues] = useState<Record<string, number>>({});
   const [trainingTag, setTrainingTag] = useState("training");
+  const [captureTargetImages, setCaptureTargetImages] = useState(120);
+  const [captureExtractionFps, setCaptureExtractionFps] = useState(2.0);
+  const [captureBufferSec, setCaptureBufferSec] = useState(8);
+  const [captureDurationOverrideSec, setCaptureDurationOverrideSec] = useState(0);
   const [mapName, setMapName] = useState("map_snapshot");
   const [goalX, setGoalX] = useState(0);
   const [goalY, setGoalY] = useState(0);
@@ -196,6 +200,19 @@ export default function App(): JSX.Element {
 
   const status = robot.status;
   const capabilities = status?.capabilities || {};
+  const recordingStatus = status?.recording?.status;
+  const capturePlan = status?.recording?.capture_plan;
+  const bagStoragePath = recordingStatus?.storage_path || "n/a";
+  const activeOutputDir = recordingStatus?.active?.output_dir || capturePlan?.output_dir || "";
+  const extractedOutputPath = capturePlan?.extractor_output_path || "n/a";
+  const captureRemainingSec =
+    capturePlan?.active && capturePlan?.stop_at_unix
+      ? Math.max(0, capturePlan.stop_at_unix - Date.now() / 1000)
+      : 0;
+  const plannedCaptureDurationSec =
+    captureDurationOverrideSec > 0
+      ? captureDurationOverrideSec
+      : (captureTargetImages / Math.max(0.1, captureExtractionFps)) + captureBufferSec;
   const logSources: LogSource[] = status?.logs?.sources || [];
   const cameraStreamTopics = status?.visualizer?.camera?.available_topics || [];
   const mapTopic = status?.visualizer?.map?.topic || "";
@@ -1054,6 +1071,8 @@ export default function App(): JSX.Element {
             </Space.Compact>
             <Divider />
             <Text type="secondary">Storage: {status?.recording?.status?.storage_path || "n/a"}</Text>
+            <br />
+            <Text type="secondary">Active bag: {status?.recording?.status?.active?.output_dir || "n/a"}</Text>
             <Table
               size="small"
               pagination={false}
@@ -1810,12 +1829,84 @@ export default function App(): JSX.Element {
   const renderTraining = (): JSX.Element => (
     <Card title="Training + Data Capture" className="hmi-card">
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Text>Capture datasets with tags, then use replay hint for offline model training loops.</Text>
+        <Text>Run guided capture by target image count, or set an explicit duration override.</Text>
         <Space.Compact style={{ width: "100%" }}>
-          <Input value={trainingTag} onChange={(event) => setTrainingTag(event.target.value)} placeholder="dataset tag" />
-          <Button type="primary" onClick={() => runAction("Training bag started", () => postApi("/api/recording/start", { tags: trainingTag }))}>Start Capture</Button>
-          <Button onClick={() => runAction("Training bag stopped", () => postApi("/api/recording/stop", {}))}>Stop Capture</Button>
+          <Input
+            value={trainingTag}
+            onChange={(event) => setTrainingTag(event.target.value)}
+            placeholder="dataset tag (e.g. s07_mixed_clutter)"
+          />
+          <Button
+            type="primary"
+            onClick={() =>
+              runAction("Timed capture started", () =>
+                postApi("/api/recording/capture_plan_start", {
+                  tags: trainingTag,
+                  target_images: captureTargetImages,
+                  extraction_fps: captureExtractionFps,
+                  safety_buffer_sec: captureBufferSec,
+                  duration_sec: captureDurationOverrideSec,
+                }),
+              )
+            }
+          >
+            Start Timed Capture
+          </Button>
+          <Button
+            onClick={() => runAction("Manual capture started", () => postApi("/api/recording/start", { tags: trainingTag }))}
+          >
+            Start Manual
+          </Button>
+          <Button onClick={() => runAction("Capture stopped", () => postApi("/api/recording/stop", {}))}>Stop</Button>
         </Space.Compact>
+        <Space wrap size={16}>
+          <Space>
+            <Text>Target images</Text>
+            <InputNumber min={1} max={5000} value={captureTargetImages} onChange={(v) => setCaptureTargetImages(Number(v || 1))} />
+          </Space>
+          <Space>
+            <Text>Extractor FPS</Text>
+            <InputNumber
+              min={0.1}
+              max={30}
+              step={0.1}
+              value={captureExtractionFps}
+              onChange={(v) => setCaptureExtractionFps(Number(v || 2))}
+            />
+          </Space>
+          <Space>
+            <Text>Buffer (sec)</Text>
+            <InputNumber min={0} max={120} value={captureBufferSec} onChange={(v) => setCaptureBufferSec(Number(v || 0))} />
+          </Space>
+          <Space>
+            <Text>Duration override (sec)</Text>
+            <InputNumber
+              min={0}
+              max={3600}
+              value={captureDurationOverrideSec}
+              onChange={(v) => setCaptureDurationOverrideSec(Number(v || 0))}
+            />
+          </Space>
+        </Space>
+        <Alert
+          type="info"
+          showIcon
+          message={`Planned capture runtime: ${plannedCaptureDurationSec.toFixed(1)} sec`}
+          description={
+            captureDurationOverrideSec > 0
+              ? "Duration override is active. Target image estimate is not used for runtime."
+              : "Runtime is estimated as target_images / extractor_fps + buffer."
+          }
+        />
+        <Space direction="vertical" size={4} style={{ width: "100%" }}>
+          <Text type="secondary">Bag storage root: {bagStoragePath}</Text>
+          <Text type="secondary">Active bag output: {activeOutputDir || "n/a"}</Text>
+          <Text type="secondary">Extracted image output: {extractedOutputPath}</Text>
+          <Text type="secondary">
+            Capture plan state: {capturePlan?.state || "idle"}
+            {capturePlan?.active ? ` (remaining ${captureRemainingSec.toFixed(1)} sec)` : ""}
+          </Text>
+        </Space>
         <Button
           onClick={() =>
             runAction("Replay hint fetched", async () => {
