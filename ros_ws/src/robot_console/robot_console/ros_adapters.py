@@ -205,6 +205,18 @@ class RosAdapters:
         self._camera_stream_subs: Dict[str, Any] = {}
         self._camera_stream_frames: Dict[str, Dict[str, Any]] = {}
         self._camera_stream_lock = threading.Lock()
+        # Some camera stacks publish CompressedImage with RELIABLE QoS while others
+        # use BEST_EFFORT. We subscribe with both to avoid refresh stalls caused by
+        # QoS-specific delivery behavior on certain DDS/camera combinations.
+        self._camera_stream_qos_profiles = [
+            qos_profile_sensor_data,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=5,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            ),
+        ]
 
         configured_stream_topics = topics.get("camera_compressed_topics", []) or []
         configured_stream_topics = [
@@ -1458,12 +1470,17 @@ class RosAdapters:
         if topic_name in self._camera_stream_subs:
             return
 
-        self._camera_stream_subs[topic_name] = self._node.create_subscription(
-            CompressedImage,
-            topic_name,
-            self._make_camera_stream_callback(topic_name),
-            qos_profile_sensor_data,
-        )
+        callback = self._make_camera_stream_callback(topic_name)
+        subscriptions = [
+            self._node.create_subscription(
+                CompressedImage,
+                topic_name,
+                callback,
+                qos,
+            )
+            for qos in self._camera_stream_qos_profiles
+        ]
+        self._camera_stream_subs[topic_name] = subscriptions
 
     def _remember_frames(self, msg: TFMessage) -> None:
         with self._lock:
